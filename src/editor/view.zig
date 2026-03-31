@@ -2,6 +2,7 @@ const std = @import("std");
 const PieceTable = @import("buffer.zig").PieceTable;
 const CursorState = @import("cursor.zig").CursorState;
 pub const Highlighter = @import("highlight.zig").Highlighter;
+const SyntaxKind = @import("highlight.zig").SyntaxKind;
 const Renderer = @import("../ui/render.zig").Renderer;
 const FontFace = @import("../ui/font.zig").FontFace;
 const Color = @import("../ui/render.zig").Color;
@@ -22,12 +23,27 @@ const theme = struct {
     const red = Color.fromHex(0xf38ba8); // Error/close
     const peach = Color.fromHex(0xfab387); // Warnings
     const mauve = Color.fromHex(0xcba6f7); // Keywords (future)
+
+    // Syntax colors (Catppuccin Mocha)
+    const syn_keyword = Color.fromHex(0xcba6f7); // Mauve
+    const syn_function = Color.fromHex(0x89b4fa); // Blue
+    const syn_func_builtin = Color.fromHex(0xf9e2af); // Yellow
+    const syn_type = Color.fromHex(0xf9e2af); // Yellow
+    const syn_string = Color.fromHex(0xa6e3a1); // Green
+    const syn_number = Color.fromHex(0xfab387); // Peach
+    const syn_comment = Color.fromHex(0x6c7086); // Overlay0
+    const syn_operator = Color.fromHex(0x89dceb); // Sky
+    const syn_variable = Color.fromHex(0xcdd6f4); // Text
+    const syn_constant = Color.fromHex(0xfab387); // Peach
+    const syn_property = Color.fromHex(0x89b4fa); // Blue
+    const syn_punctuation = Color.fromHex(0x9399b2); // Overlay2
 };
 
 // ── EditorView ─────────────────────────────────────────────────────
 pub const EditorView = struct {
     buffer: PieceTable,
     cursor: CursorState,
+    highlighter: Highlighter,
     scroll_line: u32,
     visible_rows: u32,
     visible_cols: u32,
@@ -45,10 +61,13 @@ pub const EditorView = struct {
         errdefer cursor.deinit();
         const dirty = try allocator.alloc(bool, 1);
         @memset(dirty, true);
+        var highlighter = Highlighter.init(allocator);
+        errdefer highlighter.deinit();
 
         return .{
             .buffer = buffer,
             .cursor = cursor,
+            .highlighter = highlighter,
             .scroll_line = 0,
             .visible_rows = 1,
             .visible_cols = 80,
@@ -58,12 +77,20 @@ pub const EditorView = struct {
     }
 
     pub fn deinit(self: *EditorView) void {
+        self.highlighter.deinit();
         self.buffer.deinit();
         self.cursor.deinit();
         self.allocator.free(self.dirty_rows);
         if (self.file_path) |path| {
             self.allocator.free(path);
         }
+    }
+
+    // ── Syntax highlighting ──────────────────────────────────────────
+
+    pub fn initHighlighting(self: *EditorView) void {
+        self.highlighter.setLanguage(self.file_path);
+        self.highlighter.parse(&self.buffer);
     }
 
     // ── Viewport management ────────────────────────────────────────
@@ -131,6 +158,7 @@ pub const EditorView = struct {
 
         const pos = self.cursor.primary().head;
         try self.buffer.insert(pos, text);
+        self.highlighter.notifyEdit(&self.buffer, pos, pos, pos + @as(u32, @intCast(text.len)));
         self.cursor.moveTo(pos + @as(u32, @intCast(text.len)));
         self.modified = true;
         self.ensureCursorVisible();
@@ -158,6 +186,7 @@ pub const EditorView = struct {
 
         const del_len = pos - prev;
         try self.buffer.delete(prev, del_len);
+        self.highlighter.notifyEdit(&self.buffer, prev, prev + del_len, prev);
         self.cursor.moveTo(prev);
         self.modified = true;
         self.ensureCursorVisible();
@@ -179,6 +208,7 @@ pub const EditorView = struct {
 
         const byte_len = CursorState.utf8ByteLen(slice[0]);
         try self.buffer.delete(pos, byte_len);
+        self.highlighter.notifyEdit(&self.buffer, pos, pos + byte_len, pos);
         // Cursor stays at same position
         self.modified = true;
         self.markAllDirty();
@@ -191,6 +221,7 @@ pub const EditorView = struct {
         const start = sel.start();
         const end = sel.end();
         try self.buffer.delete(start, end - start);
+        self.highlighter.notifyEdit(&self.buffer, start, end, start);
         self.cursor.moveTo(start);
         self.modified = true;
         self.ensureCursorVisible();
@@ -247,6 +278,26 @@ pub const EditorView = struct {
         // We compute it once via lineToOffset for the first visible line,
         // then track byte_offset incrementally per row.
         var byte_offset: u32 = self.buffer.lineToOffset(self.scroll_line);
+
+        // Query tree-sitter highlights for visible range
+        const vis_start = byte_offset;
+        var vis_end = vis_start;
+        {
+            var skip_line: u32 = 0;
+            var tmp_off = vis_start;
+            while (skip_line < self.visible_rows and tmp_off < self.buffer.total_len) {
+                const sl = self.buffer.contiguousSliceAt(tmp_off);
+                if (sl.len == 0) break;
+                if (std.mem.indexOfScalar(u8, sl, '\n')) |nl| {
+                    tmp_off += @intCast(nl + 1);
+                    skip_line += 1;
+                } else {
+                    tmp_off += @intCast(sl.len);
+                }
+            }
+            vis_end = tmp_off;
+        }
+        self.highlighter.queryRange(vis_start, vis_end);
 
         var screen_row: u32 = 0;
         while (screen_row < self.visible_rows) : (screen_row += 1) {
@@ -379,6 +430,10 @@ pub const EditorView = struct {
                 cell_bg = theme.surface1;
             }
 
+            // Determine syntax color for this byte position
+            const syn = self.highlighter.getSyntaxAt(offset);
+            const fg = syntaxColor(syn);
+
             if (byte == '\t') {
                 // Render tab as spaces to next 4-column tab stop
                 const tab_stop = 4;
@@ -399,7 +454,7 @@ pub const EditorView = struct {
                 };
                 const glyph_x = @as(i32, @intCast(px_x)) + glyph.bearing_x;
                 const glyph_y = @as(i32, @intCast(row_y)) + font.ascent - glyph.bearing_y;
-                renderer.drawGlyph(glyph, glyph_x, glyph_y, theme.text);
+                renderer.drawGlyph(glyph, glyph_x, glyph_y, fg);
                 col += 1;
                 offset += 1;
             } else {
@@ -429,7 +484,7 @@ pub const EditorView = struct {
                 };
                 const glyph_x = @as(i32, @intCast(px_x)) + glyph.bearing_x;
                 const glyph_y = @as(i32, @intCast(row_y)) + font.ascent - glyph.bearing_y;
-                renderer.drawGlyph(glyph, glyph_x, glyph_y, theme.text);
+                renderer.drawGlyph(glyph, glyph_x, glyph_y, fg);
 
                 col += char_cells;
                 offset += cp_len;
@@ -473,9 +528,10 @@ pub const EditorView = struct {
             }
         }
 
-        // -- Right section: "Ln X, Col Y   UTF-8" --
-        var right_buf: [64]u8 = undefined;
-        const right_str = formatStatusRight(cursor_line + 1, cursor_col + 1, &right_buf);
+        // -- Right section: "Lang   Ln X, Col Y   UTF-8" --
+        const lang_name = self.highlighter.languageName();
+        var right_buf: [96]u8 = undefined;
+        const right_str = formatStatusRight(cursor_line + 1, cursor_col + 1, lang_name, &right_buf);
         const right_len: u32 = @intCast(right_str.len);
         const right_start = if (win_w / cell_w > right_len + 1) win_w / cell_w - right_len - 1 else 0;
 
@@ -622,6 +678,24 @@ pub const EditorView = struct {
     }
 };
 
+fn syntaxColor(kind: SyntaxKind) Color {
+    return switch (kind) {
+        .keyword => theme.syn_keyword,
+        .function => theme.syn_function,
+        .function_builtin => theme.syn_func_builtin,
+        .type_name => theme.syn_type,
+        .string => theme.syn_string,
+        .number => theme.syn_number,
+        .comment => theme.syn_comment,
+        .operator => theme.syn_operator,
+        .variable => theme.syn_variable,
+        .constant => theme.syn_constant,
+        .property => theme.syn_property,
+        .punctuation => theme.syn_punctuation,
+        .none => theme.text,
+    };
+}
+
 // ── Free functions ─────────────────────────────────────────────────
 
 fn decodeUtf8(bytes: []const u8) u32 {
@@ -681,8 +755,9 @@ fn formatU32(val: u32, buf: *[12]u8) []const u8 {
     return buf[i..];
 }
 
-fn formatStatusRight(line: u32, col: u32, buf: *[64]u8) []const u8 {
-    // Build "Ln X, Col Y   UTF-8" right-to-left style
+fn formatStatusRight(line: u32, col: u32, lang: []const u8, buf: *[96]u8) []const u8 {
+    // Build "Lang   Ln X, Col Y   UTF-8"
+    const sep = "   ";
     const prefix = "Ln ";
     const mid = ", Col ";
     const suffix = "   UTF-8";
@@ -694,6 +769,10 @@ fn formatStatusRight(line: u32, col: u32, buf: *[64]u8) []const u8 {
     const col_str = formatU32(col, &col_buf);
 
     var pos: usize = 0;
+    @memcpy(buf[pos..][0..lang.len], lang);
+    pos += lang.len;
+    @memcpy(buf[pos..][0..sep.len], sep);
+    pos += sep.len;
     @memcpy(buf[pos..][0..prefix.len], prefix);
     pos += prefix.len;
     @memcpy(buf[pos..][0..line_str.len], line_str);

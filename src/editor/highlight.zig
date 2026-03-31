@@ -64,8 +64,8 @@ fn tsReadCallback(
     payload: ?*anyopaque,
     byte_index: u32,
     _: ts.TSPoint,
-    bytes_read: *u32,
-) callconv(.C) [*c]const u8 {
+    bytes_read: [*c]u32,
+) callconv(.c) [*c]const u8 {
     const buffer: *const PieceTable = @ptrCast(@alignCast(payload));
     if (byte_index >= buffer.total_len) {
         bytes_read.* = 0;
@@ -139,7 +139,7 @@ pub const Highlighter = struct {
     }
 
     const LangInfo = struct {
-        factory: *const fn () callconv(.C) ?*const ts.TSLanguage,
+        factory: *const fn () callconv(.c) ?*const ts.TSLanguage,
         name: []const u8,
         query_dir: []const u8,
     };

@@ -43,6 +43,7 @@ pub fn main() !void {
     if (file_path) |p| {
         editor.file_path = try allocator.dupe(u8, p);
     }
+    editor.initHighlighting();
     try editor.updateViewport(win.width, win.height, &font);
 
     // Epoll setup
@@ -363,22 +364,6 @@ fn renderFrame(editor: *EditorView, win: *Window, font: *FontFace) void {
     editor.render(&renderer, font);
     win.markAllDirty();
     win.present();
-
-    // Update IME spot position to follow cursor
-    updateImePosition(editor, win, font);
-}
-
-fn updateImePosition(editor: *EditorView, win: *Window, font: *const FontFace) void {
-    const cursor_lc = editor.buffer.offsetToLineCol(editor.cursor.primary().head);
-    if (cursor_lc.line < editor.scroll_line) return;
-    const screen_row = cursor_lc.line - editor.scroll_line;
-    if (screen_row >= editor.visible_rows) return;
-
-    const gw = editor.gutterWidth(font);
-    const vcol = editor.visualColAtOffset(cursor_lc.line, cursor_lc.col);
-    const x: i16 = @intCast(@min(gw + editor.left_pad + vcol * font.cell_width, @as(u32, std.math.maxInt(i16))));
-    const y: i16 = @intCast(@min(screen_row * font.cell_height + font.cell_height, @as(u32, std.math.maxInt(i16))));
-    win.setInputPosition(x, y);
 }
 
 fn resetCursorBlink(editor: *EditorView) void {
