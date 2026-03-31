@@ -583,7 +583,7 @@ pub const EditorView = struct {
     }
 
     /// Compute the visual column for a cursor position, accounting for tabs.
-    fn visualColAtOffset(self: *const EditorView, line: u32, col: u32) u32 {
+    pub fn visualColAtOffset(self: *const EditorView, line: u32, col: u32) u32 {
         const line_start = self.buffer.lineToOffset(line);
         const target = line_start + col;
         var vcol: u32 = 0;
@@ -604,7 +604,7 @@ pub const EditorView = struct {
         return vcol;
     }
 
-    fn gutterWidth(self: *const EditorView, font: *const FontFace) u32 {
+    pub fn gutterWidth(self: *const EditorView, font: *const FontFace) u32 {
         const digits = self.gutterDigits();
         return (digits + 1) * font.cell_width + self.left_pad;
     }

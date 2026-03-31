@@ -850,6 +850,22 @@ pub const Window = struct {
         return c.xcb_get_file_descriptor(self.connection);
     }
 
+    /// Update IME preedit window position to follow cursor.
+    pub fn setInputPosition(self: *Window, x: i16, y: i16) void {
+        if (self.xim == null or self.xic == 0 or !self.xim_connected) return;
+        const spot = c.xcb_point_t{ .x = x, .y = y };
+        _ = c.xcb_xim_set_ic_values(
+            self.xim.?,
+            self.xic,
+            null, // callback (fire-and-forget)
+            null, // user_data
+            c.XCB_XIM_XNSpotLocation,
+            &spot,
+            @as(?*anyopaque, null),
+        );
+        _ = c.xcb_flush(self.connection);
+    }
+
     // ── Clipboard ────────────────────────────────────────────────────
 
     pub fn requestClipboard(self: *Window) void {
