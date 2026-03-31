@@ -5,7 +5,33 @@ const FontFace = @import("ui/font.zig").FontFace;
 const render_mod = @import("ui/render.zig");
 const Renderer = render_mod.Renderer;
 const EditorView = @import("editor/view.zig").EditorView;
+const PieceTable = @import("editor/buffer.zig").PieceTable;
 const keymap = @import("input/keymap.zig");
+const Overlay = @import("ui/overlay.zig").Overlay;
+const fuzzy = @import("core/fuzzy.zig");
+const file_walker = @import("core/file_walker.zig");
+
+const EditorMode = enum {
+    normal,
+    command_palette,
+    file_finder,
+    search,
+    goto_line,
+};
+
+const command_list = [_][]const u8{
+    "File: Save",
+    "File: Open",
+    "Edit: Undo",
+    "Edit: Redo",
+    "Edit: Select All",
+    "Edit: Copy",
+    "Edit: Cut",
+    "Edit: Paste",
+    "View: Go to Line",
+    "View: Find",
+    "Editor: Close",
+};
 
 const font_path = "/usr/share/fonts/PlemolJP/PlemolJPConsoleNF-Regular.ttf";
 
@@ -46,6 +72,14 @@ pub fn main() !void {
     editor.initHighlighting();
     try editor.updateViewport(win.width, win.height, &font);
 
+    // Overlay state
+    var mode: EditorMode = .normal;
+    var overlay = Overlay{};
+    var file_list: ?[][]const u8 = null;
+    defer if (file_list) |fl| file_walker.freeFiles(allocator, fl);
+    var filtered_display: std.ArrayList([]const u8) = .{};
+    defer filtered_display.deinit(allocator);
+
     // Epoll setup
     const epoll_fd = try std.posix.epoll_create1(std.os.linux.EPOLL.CLOEXEC);
     defer std.posix.close(epoll_fd);
@@ -71,7 +105,7 @@ pub fn main() !void {
     var mouse_dragging = false;
 
     // Initial render
-    renderFrame(&editor, &win, &font);
+    renderFrame(&editor, &win, &font, &overlay);
 
     while (running) {
         var events: [16]std.os.linux.epoll_event = undefined;
@@ -85,16 +119,32 @@ pub fn main() !void {
                             .close => running = false,
 
                             .key_press => |ke| {
-                                const mod = keymap.modFromWindow(ke.modifiers);
-                                if (keymap.mapKey(ke.keysym, mod)) |action| {
-                                    handleAction(&editor, &win, action);
-                                    resetCursorBlink(&editor);
+                                if (mode != .normal) {
+                                    handleOverlayKey(&mode, &overlay, &editor, ke, allocator, &file_list, &filtered_display);
+                                } else {
+                                    const mod = keymap.modFromWindow(ke.modifiers);
+                                    if (keymap.mapKey(ke.keysym, mod)) |action| {
+                                        switch (action) {
+                                            .command_palette => openCommandPalette(&mode, &overlay, &filtered_display, allocator),
+                                            .finder_files => openFileFinder(&mode, &overlay, allocator, &file_list, &filtered_display),
+                                            .find => openSearch(&mode, &overlay),
+                                            .goto_line => openGotoLine(&mode, &overlay),
+                                            else => handleAction(&editor, &win, action),
+                                        }
+                                        resetCursorBlink(&editor);
+                                    }
                                 }
                             },
 
                             .text_input => |te| {
-                                editor.insertAtCursor(te.slice()) catch {};
-                                resetCursorBlink(&editor);
+                                if (mode != .normal) {
+                                    overlay.appendText(te.slice());
+                                    updateOverlayResults(&mode, &overlay, allocator, file_list, &filtered_display);
+                                    editor.markAllDirty();
+                                } else {
+                                    editor.insertAtCursor(te.slice()) catch {};
+                                    resetCursorBlink(&editor);
+                                }
                             },
 
                             .resize => |r| {
@@ -172,7 +222,7 @@ pub fn main() !void {
             }
         }
 
-        renderFrame(&editor, &win, &font);
+        renderFrame(&editor, &win, &font, &overlay);
     }
 }
 
@@ -278,6 +328,8 @@ fn handleAction(editor: *EditorView, win: *Window, action: keymap.Action) void {
         },
         .save => saveFile(editor),
         .quit => std.process.exit(0),
+        // These are handled before reaching handleAction
+        .command_palette, .finder_files, .find, .goto_line => {},
     }
 }
 
@@ -354,7 +406,7 @@ fn saveFile(editor: *EditorView) void {
     editor.markAllDirty(); // Redraw status bar
 }
 
-fn renderFrame(editor: *EditorView, win: *Window, font: *FontFace) void {
+fn renderFrame(editor: *EditorView, win: *Window, font: *FontFace, overlay: *Overlay) void {
     var renderer = Renderer{
         .buffer = win.getBuffer(),
         .stride = win.stride,
@@ -362,6 +414,7 @@ fn renderFrame(editor: *EditorView, win: *Window, font: *FontFace) void {
         .height = win.height,
     };
     editor.render(&renderer, font);
+    overlay.render(&renderer, font);
     win.markAllDirty();
     win.present();
 }
@@ -379,4 +432,229 @@ fn createTimerFd(interval_ns: u64) !std.posix.fd_t {
     const spec = std.os.linux.itimerspec{ .it_interval = ts, .it_value = ts };
     try std.posix.timerfd_settime(fd, .{}, &spec, null);
     return fd;
+}
+
+// ── Overlay mode openers ──────────────────────────────────────────
+
+fn openCommandPalette(mode: *EditorMode, overlay: *Overlay, filtered_display: *std.ArrayList([]const u8), allocator: std.mem.Allocator) void {
+    mode.* = .command_palette;
+    overlay.open("Command Palette");
+    // Pre-populate with all commands
+    filtered_display.clearRetainingCapacity();
+    for (&command_list) |cmd| {
+        filtered_display.append(allocator, cmd) catch {};
+    }
+    overlay.items = filtered_display.items;
+}
+
+fn openFileFinder(mode: *EditorMode, overlay: *Overlay, allocator: std.mem.Allocator, file_list: *?[][]const u8, filtered_display: *std.ArrayList([]const u8)) void {
+    // Walk files if not cached
+    if (file_list.* == null) {
+        file_list.* = file_walker.walkFiles(allocator, ".", 5000) catch null;
+    }
+    mode.* = .file_finder;
+    overlay.open("Open File");
+    // Pre-populate with all files
+    filtered_display.clearRetainingCapacity();
+    if (file_list.*) |files| {
+        for (files) |f| {
+            filtered_display.append(allocator, f) catch {};
+        }
+    }
+    overlay.items = filtered_display.items;
+}
+
+fn openSearch(mode: *EditorMode, overlay: *Overlay) void {
+    mode.* = .search;
+    overlay.open("Search");
+}
+
+fn openGotoLine(mode: *EditorMode, overlay: *Overlay) void {
+    mode.* = .goto_line;
+    overlay.open("Go to Line");
+}
+
+// ── Overlay keyboard handler ──────────────────────────────────────
+
+fn handleOverlayKey(
+    mode: *EditorMode,
+    overlay: *Overlay,
+    editor: *EditorView,
+    ke: window_mod.KeyEvent,
+    allocator: std.mem.Allocator,
+    file_list: *?[][]const u8,
+    filtered_display: *std.ArrayList([]const u8),
+) void {
+    const keysym = ke.keysym;
+
+    if (keysym == window_mod.XK_Escape) {
+        overlay.close();
+        mode.* = .normal;
+        editor.markAllDirty();
+        return;
+    }
+
+    if (keysym == window_mod.XK_Return) {
+        switch (mode.*) {
+            .file_finder => {
+                if (overlay.selectedItem()) |path| {
+                    openFile(editor, allocator, path);
+                }
+            },
+            .goto_line => {
+                const input = overlay.inputSlice();
+                const line_num = std.fmt.parseInt(u32, input, 10) catch 0;
+                if (line_num > 0) {
+                    const offset = editor.buffer.lineToOffset(line_num - 1);
+                    editor.cursor.moveTo(offset);
+                    editor.ensureCursorVisible();
+                }
+            },
+            .search => {
+                const query = overlay.inputSlice();
+                findNext(editor, query);
+            },
+            .command_palette => {
+                if (overlay.selectedItem()) |cmd_name| {
+                    executeCommand(cmd_name, editor);
+                }
+            },
+            .normal => {},
+        }
+        overlay.close();
+        mode.* = .normal;
+        editor.markAllDirty();
+        return;
+    }
+
+    if (keysym == window_mod.XK_Up) {
+        overlay.moveUp();
+        editor.markAllDirty();
+        return;
+    }
+    if (keysym == window_mod.XK_Down) {
+        overlay.moveDown();
+        editor.markAllDirty();
+        return;
+    }
+    if (keysym == window_mod.XK_BackSpace) {
+        overlay.backspace();
+        updateOverlayResults(mode, overlay, allocator, file_list.*, filtered_display);
+        editor.markAllDirty();
+        return;
+    }
+}
+
+// ── Update overlay results on input change ────────────────────────
+
+fn updateOverlayResults(
+    mode: *const EditorMode,
+    overlay: *Overlay,
+    allocator: std.mem.Allocator,
+    file_list: ?[][]const u8,
+    filtered_display: *std.ArrayList([]const u8),
+) void {
+    const query = overlay.inputSlice();
+    filtered_display.clearRetainingCapacity();
+
+    switch (mode.*) {
+        .file_finder => {
+            if (file_list) |files| {
+                const matches = fuzzy.filter(allocator, query, files, 50) catch {
+                    overlay.items = &.{};
+                    return;
+                };
+                defer allocator.free(matches);
+                for (matches) |m| {
+                    filtered_display.append(allocator, files[m.index]) catch {};
+                }
+            }
+        },
+        .command_palette => {
+            const matches = fuzzy.filter(allocator, query, &command_list, 50) catch {
+                overlay.items = &.{};
+                return;
+            };
+            defer allocator.free(matches);
+            for (matches) |m| {
+                filtered_display.append(allocator, command_list[m.index]) catch {};
+            }
+        },
+        else => {},
+    }
+
+    overlay.items = filtered_display.items;
+    overlay.selected = 0;
+    overlay.scroll_offset = 0;
+}
+
+// ── Find next occurrence in buffer ────────────────────────────────
+
+fn findNext(editor: *EditorView, query: []const u8) void {
+    if (query.len == 0) return;
+    const content = editor.buffer.collectContent(editor.allocator) catch return;
+    defer editor.allocator.free(content);
+
+    const cursor_pos = editor.cursor.primary().head;
+    const start: usize = @min(@as(usize, cursor_pos) + 1, content.len);
+
+    // Search forward from cursor
+    if (start < content.len) {
+        if (std.mem.indexOf(u8, content[start..], query)) |pos| {
+            const abs_pos: u32 = @intCast(start + pos);
+            const end_pos: u32 = abs_pos + @as(u32, @intCast(query.len));
+            editor.cursor.cursors.items[0] = .{ .anchor = abs_pos, .head = end_pos };
+            editor.ensureCursorVisible();
+            return;
+        }
+    }
+    // Wrap around
+    if (std.mem.indexOf(u8, content, query)) |pos| {
+        const abs_pos: u32 = @intCast(pos);
+        const end_pos: u32 = abs_pos + @as(u32, @intCast(query.len));
+        editor.cursor.cursors.items[0] = .{ .anchor = abs_pos, .head = end_pos };
+        editor.ensureCursorVisible();
+    }
+}
+
+// ── Open a file into the editor ───────────────────────────────────
+
+fn openFile(editor: *EditorView, allocator: std.mem.Allocator, path: []const u8) void {
+    const new_content = std.fs.cwd().readFileAlloc(allocator, path, 100 * 1024 * 1024) catch return;
+    // Note: the old buffer's original content may have been the CLI arg content,
+    // which is freed via owned_content defer in main(). For reopened files,
+    // we intentionally leak the old content to keep the PieceTable valid.
+    // This is a known limitation -- acceptable for a single-file editor session.
+
+    editor.buffer.deinit();
+    editor.buffer = PieceTable.init(allocator, new_content) catch return;
+    editor.cursor.moveTo(0);
+    editor.scroll_line = 0;
+    editor.modified = false;
+    if (editor.file_path) |old| allocator.free(old);
+    editor.file_path = allocator.dupe(u8, path) catch null;
+    editor.initHighlighting();
+    editor.markAllDirty();
+}
+
+// ── Execute a command palette command ─────────────────────────────
+
+fn executeCommand(cmd_name: []const u8, editor: *EditorView) void {
+    if (std.mem.eql(u8, cmd_name, "File: Save")) {
+        saveFile(editor);
+    } else if (std.mem.eql(u8, cmd_name, "Edit: Undo")) {
+        _ = editor.buffer.undo() catch {};
+        editor.markAllDirty();
+    } else if (std.mem.eql(u8, cmd_name, "Edit: Redo")) {
+        _ = editor.buffer.redo() catch {};
+        editor.markAllDirty();
+    } else if (std.mem.eql(u8, cmd_name, "Edit: Select All")) {
+        editor.cursor.cursors.items[0] = .{ .anchor = 0, .head = editor.buffer.total_len };
+        editor.markAllDirty();
+    } else if (std.mem.eql(u8, cmd_name, "Editor: Close")) {
+        std.process.exit(0);
+    }
+    // Other commands (Copy, Cut, Paste, Open, Find, Go to Line) require
+    // additional context (window for clipboard, overlay for sub-modes).
+    // They are no-ops from the palette for now.
 }

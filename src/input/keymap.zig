@@ -42,6 +42,11 @@ pub const Action = enum {
     // File
     save,
     quit,
+    // Overlay modes
+    command_palette,
+    finder_files,
+    find,
+    goto_line,
 };
 
 pub fn modFromWindow(mods: Window.Modifiers) Modifier {
@@ -65,12 +70,16 @@ pub fn mapKey(keysym: u32, mods: Modifier) ?Action {
             'z' => .undo,
             's' => .save,
             'q' => .quit,
+            'p' => .finder_files,
+            'f' => .find,
+            'g' => .goto_line,
             else => null,
         };
     }
     if (mods == .ctrl_shift) {
         return switch (keysym) {
             'z', 'Z' => .redo,
+            'p', 'P' => .command_palette,
             else => null,
         };
     }
