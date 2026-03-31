@@ -44,7 +44,8 @@ pub const TextEvent = struct {
     len: u32 = 0,
 
     pub fn slice(self: *const TextEvent) []const u8 {
-        return self.data[0..self.len];
+        const safe_len = @min(self.len, self.data.len);
+        return self.data[0..safe_len];
     }
 };
 
@@ -895,7 +896,7 @@ pub const Window = struct {
 
     /// Serve clipboard content to another application requesting our selection.
     fn handleSelectionRequest(self: *Window, req: *c.xcb_selection_request_event_t) void {
-        var notify: c.xcb_selection_notify_event_t = undefined;
+        var notify: c.xcb_selection_notify_event_t = std.mem.zeroes(c.xcb_selection_notify_event_t);
         notify.response_type = c.XCB_SELECTION_NOTIFY;
         notify.requestor = req.*.requestor;
         notify.selection = req.*.selection;

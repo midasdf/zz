@@ -102,16 +102,19 @@ pub const FontFace = struct {
         var pixels: []u8 = &.{};
         if (w > 0 and h > 0 and bitmap.buffer != null) {
             pixels = try self.allocator.alloc(u8, w * h);
+            errdefer self.allocator.free(pixels);
             const pitch: i32 = bitmap.pitch;
+            const abs_pitch: u32 = @intCast(if (pitch < 0) -pitch else pitch);
 
-            if (pitch == @as(i32, @intCast(w))) {
-                // Pitch matches width: single memcpy
+            if (abs_pitch == w and pitch > 0) {
+                // Pitch matches width, top-down: single memcpy
                 @memcpy(pixels, bitmap.buffer[0 .. w * h]);
             } else {
-                // Pitch differs: copy row by row
+                // Copy row by row (handles pitch != width and bottom-up bitmaps)
                 const src: [*]const u8 = bitmap.buffer;
                 for (0..h) |row| {
-                    const src_offset: usize = @intCast(@as(i32, @intCast(row)) * pitch);
+                    const src_row = if (pitch < 0) h - 1 - row else row;
+                    const src_offset: usize = src_row * abs_pitch;
                     const dst_offset: usize = row * w;
                     @memcpy(pixels[dst_offset..][0..w], src[src_offset..][0..w]);
                 }

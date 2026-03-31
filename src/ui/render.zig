@@ -77,6 +77,8 @@ pub const Renderer = struct {
                     self.buffer[offset] = @intCast((@as(u16, fg.b) * a + @as(u16, self.buffer[offset]) * inv_a) / 255);
                     self.buffer[offset + 1] = @intCast((@as(u16, fg.g) * a + @as(u16, self.buffer[offset + 1]) * inv_a) / 255);
                     self.buffer[offset + 2] = @intCast((@as(u16, fg.r) * a + @as(u16, self.buffer[offset + 2]) * inv_a) / 255);
+                    const dst_a = @as(u16, self.buffer[offset + 3]);
+                    self.buffer[offset + 3] = @intCast(@min(@as(u16, 255), a + (dst_a * inv_a) / 255));
                 }
             }
         }
