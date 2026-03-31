@@ -8,6 +8,7 @@ const Renderer = @import("../ui/render.zig").Renderer;
 const FontFace = @import("../ui/font.zig").FontFace;
 const Color = @import("../ui/render.zig").Color;
 const Diagnostic = @import("../lsp/client.zig").Diagnostic;
+pub const GitInfo = @import("../core/git.zig").GitInfo;
 
 // ── Catppuccin Mocha palette ───────────────────────────────────────
 const theme = struct {
@@ -56,6 +57,7 @@ pub const EditorView = struct {
     file_path: ?[]const u8 = null,
     cursor_visible: bool = true,
     lsp_diagnostics: []const Diagnostic = &.{},
+    git_info: ?*GitInfo = null,
     y_offset: u32 = 0, // Pixel offset for tab bar
     x_offset: u32 = 0, // Pixel offset for split panes
     render_width: u32 = 0, // Pane width (0 = use renderer.width)
@@ -558,6 +560,20 @@ pub const EditorView = struct {
                 self.renderGutterNumber(renderer, font, doc_line, screen_row, is_current_line);
             }
 
+            // -- Git diff gutter marker (2px bar at left edge of gutter) --
+            if (self.git_info) |gi| {
+                if (doc_line < total_lines) {
+                    if (gi.lineKind(doc_line)) |kind| {
+                        const diff_color: Color = switch (kind) {
+                            .added => theme.green,
+                            .modified => theme.peach,
+                            .deleted => theme.red,
+                        };
+                        renderer.fillRect(xo, row_y, 2, cell_h, diff_color);
+                    }
+                }
+            }
+
             // -- Gutter separator (1px vertical line) --
             const sep_x = xo + gw - self.left_pad / 2;
             renderer.fillRect(sep_x, row_y, 1, cell_h, theme.surface2);
@@ -812,17 +828,23 @@ pub const EditorView = struct {
             }
         }
 
-        // -- Right section: "Lang   Ln X, Col Y   UTF-8" --
+        // -- Right section: "branch   Lang   Ln X, Col Y   UTF-8" --
         const lang_name = self.highlighter.languageName();
-        var right_buf: [96]u8 = undefined;
-        const right_str = formatStatusRight(cursor_line + 1, cursor_col + 1, lang_name, &right_buf);
+        const branch_name = if (self.git_info) |gi| gi.branchName() else "";
+        var right_buf: [192]u8 = undefined;
+        const right_str = formatStatusRight(cursor_line + 1, cursor_col + 1, lang_name, branch_name, &right_buf);
         const right_len: u32 = @intCast(right_str.len);
         const right_start = if (pw / cell_w > right_len + 1) pw / cell_w - right_len - 1 else 0;
 
         for (right_str, 0..) |ch, i| {
             const col = right_start + @as(u32, @intCast(i));
             if (col >= self.visible_cols) break;
-            self.drawStatusChar(renderer, font, ch, col, bar_y, theme.subtext0);
+            // Highlight branch name in lavender
+            const fg = if (branch_name.len > 0 and i < branch_name.len)
+                theme.lavender
+            else
+                theme.subtext0;
+            self.drawStatusChar(renderer, font, ch, col, bar_y, fg);
         }
     }
 
@@ -987,6 +1009,7 @@ pub fn renderTabBar(
     tab_mgr: *const TabManager,
     renderer: *Renderer,
     font: *FontFace,
+    x_start: u32,
 ) void {
     const cell_w = font.cell_width;
     const cell_h = font.cell_height;
@@ -1001,8 +1024,8 @@ pub fn renderTabBar(
     // Bottom separator
     renderer.fillRect(0, bar_h - 1, win_w, 1, theme.surface2);
 
-    // Render each tab
-    var x: u32 = 2;
+    // Render each tab (offset by sidebar width)
+    var x: u32 = x_start + 2;
     for (tab_mgr.tabs.items, 0..) |tab, i| {
         const is_active = (i == tab_mgr.active);
         const bg = if (is_active) theme.base else theme.mantle;
@@ -1135,8 +1158,8 @@ fn formatU32(val: u32, buf: *[12]u8) []const u8 {
     return buf[i..];
 }
 
-fn formatStatusRight(line: u32, col: u32, lang: []const u8, buf: *[96]u8) []const u8 {
-    // Build "Lang   Ln X, Col Y   UTF-8"
+fn formatStatusRight(line: u32, col: u32, lang: []const u8, branch: []const u8, buf: *[192]u8) []const u8 {
+    // Build "branch   Lang   Ln X, Col Y   UTF-8"
     const sep = "   ";
     const prefix = "Ln ";
     const mid = ", Col ";
@@ -1149,6 +1172,15 @@ fn formatStatusRight(line: u32, col: u32, lang: []const u8, buf: *[96]u8) []cons
     const col_str = formatU32(col, &col_buf);
 
     var pos: usize = 0;
+
+    // Branch name first (if available)
+    if (branch.len > 0) {
+        @memcpy(buf[pos..][0..branch.len], branch);
+        pos += branch.len;
+        @memcpy(buf[pos..][0..sep.len], sep);
+        pos += sep.len;
+    }
+
     @memcpy(buf[pos..][0..lang.len], lang);
     pos += lang.len;
     @memcpy(buf[pos..][0..sep.len], sep);

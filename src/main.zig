@@ -15,6 +15,8 @@ const Overlay = @import("ui/overlay.zig").Overlay;
 const fuzzy = @import("core/fuzzy.zig");
 const file_walker = @import("core/file_walker.zig");
 const lsp = @import("lsp/client.zig");
+const FileTree = @import("ui/file_tree.zig").FileTree;
+const GitInfo = @import("core/git.zig").GitInfo;
 
 const EditorMode = enum {
     normal,
@@ -81,9 +83,22 @@ pub fn main() !void {
     initial_view.initHighlighting();
     try initial_view.updateViewport(win.width, win.height, &font);
 
+    // Git integration
+    var git_info = GitInfo.init(allocator);
+    defer git_info.deinit();
+    git_info.readBranch();
+    if (file_path) |fp| {
+        git_info.computeDiff(fp);
+    }
+    initial_view.git_info = &git_info;
+
     // Pane manager
     var pane_mgr = try PaneManager.init(allocator, initial_view);
     defer pane_mgr.deinit();
+
+    // File tree sidebar
+    var file_tree = FileTree.init(allocator, ".");
+    defer file_tree.deinit();
 
     // LSP client
     var lsp_client = lsp.LspClient.init(allocator);
@@ -159,7 +174,7 @@ pub fn main() !void {
     {
         const editor = tab_mgr.activeView();
         editor.lsp_diagnostics = lsp_client.diagnostics.items;
-        renderFrame(&tab_mgr, &pane_mgr, &win, &font, &overlay);
+        renderFrame(&tab_mgr, &pane_mgr, &win, &font, &overlay, &file_tree);
     }
 
     while (running) {
@@ -176,7 +191,7 @@ pub fn main() !void {
 
                             .key_press => |ke| {
                                 if (mode != .normal) {
-                                    handleOverlayKey(&mode, &overlay, &tab_mgr, &pane_mgr, ke, allocator, &file_list, &filtered_display, &lsp_client, &font);
+                                    handleOverlayKey(&mode, &overlay, &tab_mgr, &pane_mgr, ke, allocator, &file_list, &filtered_display, &lsp_client, &font, &git_info);
                                 } else {
                                     const mod = keymap.modFromWindow(ke.modifiers);
                                     if (keymap.mapKey(ke.keysym, mod)) |action| {
@@ -188,23 +203,26 @@ pub fn main() !void {
                                             .next_tab => {
                                                 tab_mgr.nextTab();
                                                 syncPaneToActiveTab(&pane_mgr, &tab_mgr);
+                                                recomputeGitDiff(&git_info, tab_mgr.activeView());
                                                 tab_mgr.activeView().markAllDirty();
                                             },
                                             .prev_tab => {
                                                 tab_mgr.prevTab();
                                                 syncPaneToActiveTab(&pane_mgr, &tab_mgr);
+                                                recomputeGitDiff(&git_info, tab_mgr.activeView());
                                                 tab_mgr.activeView().markAllDirty();
                                             },
                                             .close_tab => {
                                                 tab_mgr.closeActive();
                                                 syncPaneToActiveTab(&pane_mgr, &tab_mgr);
+                                                recomputeGitDiff(&git_info, tab_mgr.activeView());
                                                 tab_mgr.activeView().markAllDirty();
                                             },
                                             .split_vertical => {
-                                                handleSplit(&pane_mgr, &tab_mgr, .vertical, allocator, &font, tab_bar_h, win.width, win.height);
+                                                handleSplit(&pane_mgr, &tab_mgr, .vertical, allocator, &font, &file_tree, tab_bar_h, win.width, win.height);
                                             },
                                             .split_horizontal => {
-                                                handleSplit(&pane_mgr, &tab_mgr, .horizontal, allocator, &font, tab_bar_h, win.width, win.height);
+                                                handleSplit(&pane_mgr, &tab_mgr, .horizontal, allocator, &font, &file_tree, tab_bar_h, win.width, win.height);
                                             },
                                             .focus_next_pane => {
                                                 pane_mgr.focusNext();
@@ -215,10 +233,16 @@ pub fn main() !void {
                                             .close_pane => {
                                                 if (pane_mgr.isSplit()) {
                                                     pane_mgr.unsplitActive();
-                                                    relayoutPanes(&pane_mgr, tab_bar_h, win.width, win.height, &font);
+                                                    relayoutPanes(&pane_mgr, &file_tree, tab_bar_h, win.width, win.height, &font);
                                                     syncTabToActivePane(&pane_mgr, &tab_mgr);
                                                     markAllPanesDirty(&pane_mgr);
                                                 }
+                                            },
+                                            .toggle_sidebar => {
+                                                file_tree.toggle();
+                                                file_tree.active_path = if (pane_mgr.active_leaf.file_path) |p| p else null;
+                                                relayoutPanes(&pane_mgr, &file_tree, tab_bar_h, win.width, win.height, &font);
+                                                markAllPanesDirty(&pane_mgr);
                                             },
                                             else => handleAction(editor, &win, action, &lsp_client, allocator),
                                         }
@@ -241,7 +265,7 @@ pub fn main() !void {
 
                             .resize => |r| {
                                 win.resize(r.width, r.height) catch {};
-                                relayoutPanes(&pane_mgr, tab_bar_h, r.width, r.height, &font);
+                                relayoutPanes(&pane_mgr, &file_tree, tab_bar_h, r.width, r.height, &font);
                             },
 
                             .expose => markAllPanesDirty(&pane_mgr),
@@ -252,10 +276,22 @@ pub fn main() !void {
 
                             .mouse_press => |me| {
                                 if (me.button == .left) {
-                                    // Check if click is in tab bar area
-                                    if (me.y >= 0 and me.y < @as(i32, @intCast(tab_bar_h))) {
-                                        handleTabBarClick(&tab_mgr, me.x, &font);
+                                    const sw = file_tree.sidebarWidth(&font);
+                                    if (file_tree.visible and me.x >= 0 and me.x < @as(i32, @intCast(sw))) {
+                                        // Click in file tree sidebar
+                                        if (file_tree.handleClick(me.x, me.y, &font, tab_bar_h)) |path| {
+                                            openFileInTab(&tab_mgr, allocator, path, &lsp_client, &font, &git_info);
+                                            syncPaneToActiveTab(&pane_mgr, &tab_mgr);
+                                            file_tree.active_path = if (pane_mgr.active_leaf.file_path) |p| p else null;
+                                            relayoutPanes(&pane_mgr, &file_tree, tab_bar_h, win.width, win.height, &font);
+                                        }
+                                        markAllPanesDirty(&pane_mgr);
+                                    } else if (me.y >= 0 and me.y < @as(i32, @intCast(tab_bar_h))) {
+                                        // Click in tab bar area
+                                        handleTabBarClick(&tab_mgr, me.x, &font, sw);
                                         syncPaneToActiveTab(&pane_mgr, &tab_mgr);
+                                        recomputeGitDiff(&git_info, tab_mgr.activeView());
+                                        file_tree.active_path = if (pane_mgr.active_leaf.file_path) |p| p else null;
                                     } else {
                                         // Determine which pane was clicked
                                         if (pane_mgr.isSplit()) {
@@ -346,7 +382,7 @@ pub fn main() !void {
                                 else
                                     true;
                                 if (should_open) {
-                                    openFileInTab(&tab_mgr, allocator, p, &lsp_client, &font);
+                                    openFileInTab(&tab_mgr, allocator, p, &lsp_client, &font, &git_info);
                                     syncPaneToActiveTab(&pane_mgr, &tab_mgr);
                                 }
                                 // Move cursor in the (now-active) tab
@@ -370,7 +406,7 @@ pub fn main() !void {
         {
             const editor = pane_mgr.active_leaf;
             editor.lsp_diagnostics = lsp_client.diagnostics.items;
-            renderFrame(&tab_mgr, &pane_mgr, &win, &font, &overlay);
+            renderFrame(&tab_mgr, &pane_mgr, &win, &font, &overlay, &file_tree);
         }
     }
 }
@@ -383,6 +419,7 @@ fn handleSplit(
     direction: panes_mod.Direction,
     allocator: std.mem.Allocator,
     font: *const FontFace,
+    file_tree: *FileTree,
     tab_bar_h: u32,
     win_w: u32,
     win_h: u32,
@@ -406,19 +443,21 @@ fn handleSplit(
 
     pane_mgr.splitActive(direction, new_view) catch return;
 
-    relayoutPanes(pane_mgr, tab_bar_h, win_w, win_h, font);
+    relayoutPanes(pane_mgr, file_tree, tab_bar_h, win_w, win_h, font);
     markAllPanesDirty(pane_mgr);
 }
 
-fn relayoutPanes(pane_mgr: *PaneManager, tab_bar_h: u32, win_w: u32, win_h: u32, font: *const FontFace) void {
+fn relayoutPanes(pane_mgr: *PaneManager, file_tree: *FileTree, tab_bar_h: u32, win_w: u32, win_h: u32, font: *const FontFace) void {
+    const sw = file_tree.sidebarWidth(font);
     const content_h = if (win_h > tab_bar_h) win_h - tab_bar_h else 0;
-    pane_mgr.applyLayout(0, tab_bar_h, win_w, content_h);
+    const editor_w = if (win_w > sw) win_w - sw else 0;
+    pane_mgr.applyLayout(sw, tab_bar_h, editor_w, content_h);
 
     // Update viewports for all leaves
     var leaves: [16]*EditorView = undefined;
     const count = pane_mgr.allLeaves(&leaves);
     for (leaves[0..count]) |view| {
-        view.updateViewport(view.paneWidth(win_w), win_h, font) catch {};
+        view.updateViewport(view.paneWidth(editor_w), win_h, font) catch {};
     }
 }
 
@@ -596,6 +635,7 @@ fn handleAction(editor: *EditorView, win: *Window, action: keymap.Action, lsp_cl
         .command_palette, .finder_files, .find, .goto_line => {},
         .next_tab, .prev_tab, .close_tab => {},
         .split_vertical, .split_horizontal, .focus_next_pane, .close_pane => {},
+        .toggle_sidebar => {},
     }
 }
 
@@ -678,18 +718,31 @@ fn saveFile(editor: *EditorView) void {
 
     std.fs.cwd().rename(tmp_path, path) catch return;
     editor.modified = false;
+
+    // Recompute git diff after save
+    if (editor.git_info) |gi| {
+        gi.computeDiff(path);
+    }
+
     editor.markAllDirty(); // Redraw status bar
 }
 
-fn renderFrame(tab_mgr: *TabManager, pane_mgr: *PaneManager, win: *Window, font: *FontFace, overlay: *Overlay) void {
+fn recomputeGitDiff(git_info: *GitInfo, view: *EditorView) void {
+    if (view.file_path) |fp| {
+        git_info.computeDiff(fp);
+    }
+}
+
+fn renderFrame(tab_mgr: *TabManager, pane_mgr: *PaneManager, win: *Window, font: *FontFace, overlay: *Overlay, file_tree: *FileTree) void {
     var renderer = Renderer{
         .buffer = win.getBuffer(),
         .stride = win.stride,
         .width = win.width,
         .height = win.height,
     };
-    // Render tab bar first
-    view_mod.renderTabBar(tab_mgr, &renderer, font);
+    // Render tab bar first (offset by sidebar width)
+    const sidebar_w = file_tree.sidebarWidth(font);
+    view_mod.renderTabBar(tab_mgr, &renderer, font, sidebar_w);
 
     if (pane_mgr.isSplit()) {
         // Render all pane leaves
@@ -700,14 +753,15 @@ fn renderFrame(tab_mgr: *TabManager, pane_mgr: *PaneManager, win: *Window, font:
         }
         // Render separators between panes
         const tab_bar_h = view_mod.tabBarHeight(font);
+        const editor_w = if (win.width > sidebar_w) win.width - sidebar_w else 0;
         pane_mgr.renderSeparators(
             win.getBuffer(),
             win.stride,
             win.width,
             win.height,
-            0,
+            sidebar_w,
             tab_bar_h,
-            win.width,
+            editor_w,
             if (win.height > tab_bar_h) win.height - tab_bar_h else 0,
         );
         // Active pane indicator (lavender left border, 2px)
@@ -719,6 +773,10 @@ fn renderFrame(tab_mgr: *TabManager, pane_mgr: *PaneManager, win: *Window, font:
         const editor = tab_mgr.activeView();
         editor.render(&renderer, font);
     }
+
+    // Render file tree sidebar
+    const tab_bar_h_render = view_mod.tabBarHeight(font);
+    file_tree.render(&renderer, font, tab_bar_h_render);
 
     overlay.render(&renderer, font);
     win.markAllDirty();
@@ -793,6 +851,7 @@ fn handleOverlayKey(
     filtered_display: *std.ArrayList([]const u8),
     lsp_client: *lsp.LspClient,
     font: *const FontFace,
+    git_info: ?*GitInfo,
 ) void {
     const keysym = ke.keysym;
     const editor = pane_mgr.active_leaf;
@@ -808,7 +867,7 @@ fn handleOverlayKey(
         switch (mode.*) {
             .file_finder => {
                 if (overlay.selectedItem()) |path| {
-                    openFileInTab(tab_mgr, allocator, path, lsp_client, font);
+                    openFileInTab(tab_mgr, allocator, path, lsp_client, font, git_info);
                     syncPaneToActiveTab(pane_mgr, tab_mgr);
                 }
             },
@@ -930,11 +989,16 @@ fn findNext(editor: *EditorView, query: []const u8) void {
 
 // ── Open a file in a tab (reuse existing or create new) ──────────
 
-fn openFileInTab(tab_mgr: *TabManager, allocator: std.mem.Allocator, path: []const u8, lsp_client: ?*lsp.LspClient, font: *const FontFace) void {
+fn openFileInTab(tab_mgr: *TabManager, allocator: std.mem.Allocator, path: []const u8, lsp_client: ?*lsp.LspClient, font: *const FontFace, git_info: ?*GitInfo) void {
     // Check if already open in a tab
     if (tab_mgr.findByPath(path)) |idx| {
         tab_mgr.switchTo(idx);
-        tab_mgr.activeView().markAllDirty();
+        const view = tab_mgr.activeView();
+        // Recompute diff for the switched-to file
+        if (git_info) |gi| {
+            if (view.file_path) |fp| gi.computeDiff(fp);
+        }
+        view.markAllDirty();
         return;
     }
 
@@ -947,6 +1011,12 @@ fn openFileInTab(tab_mgr: *TabManager, allocator: std.mem.Allocator, path: []con
     const view = tab_mgr.addTab(new_content, path) catch return;
     view.y_offset = tab_bar_h;
     view.initHighlighting();
+    view.git_info = git_info;
+
+    // Compute git diff for the new tab
+    if (git_info) |gi| {
+        gi.computeDiff(path);
+    }
 
     // Send didOpen for the new file to LSP
     if (lsp_client) |lc| {
@@ -964,11 +1034,11 @@ fn openFileInTab(tab_mgr: *TabManager, allocator: std.mem.Allocator, path: []con
 
 // ── Handle click on tab bar ──────────────────────────────────────
 
-fn handleTabBarClick(tab_mgr: *TabManager, click_x: i32, font: *const FontFace) void {
+fn handleTabBarClick(tab_mgr: *TabManager, click_x: i32, font: *const FontFace, sidebar_w: u32) void {
     const cell_w = font.cell_width;
     if (cell_w == 0) return;
 
-    var x: u32 = 2;
+    var x: u32 = sidebar_w + 2;
     for (tab_mgr.tabs.items, 0..) |tab, i| {
         const label = if (tab.file_path) |p| fileBasename(p) else "[untitled]";
         const label_len: u32 = @intCast(label.len);

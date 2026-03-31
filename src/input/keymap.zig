@@ -63,6 +63,8 @@ pub const Action = enum {
     split_horizontal,
     focus_next_pane,
     close_pane,
+    // Sidebar
+    toggle_sidebar,
 };
 
 pub fn modFromWindow(mods: Window.Modifiers) Modifier {
@@ -84,6 +86,7 @@ pub fn mapKey(keysym: u32, mods: Modifier) ?Action {
         const k = if (keysym >= 'A' and keysym <= 'Z') keysym + 32 else keysym;
         return switch (k) {
             'a' => .select_all,
+            'b' => .toggle_sidebar,
             'c' => .copy,
             'x' => .cut,
             'v' => .paste,
