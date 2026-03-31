@@ -621,13 +621,10 @@ fn findNext(editor: *EditorView, query: []const u8) void {
 
 fn openFile(editor: *EditorView, allocator: std.mem.Allocator, path: []const u8) void {
     const new_content = std.fs.cwd().readFileAlloc(allocator, path, 100 * 1024 * 1024) catch return;
-    // Note: the old buffer's original content may have been the CLI arg content,
-    // which is freed via owned_content defer in main(). For reopened files,
-    // we intentionally leak the old content to keep the PieceTable valid.
-    // This is a known limitation -- acceptable for a single-file editor session.
 
-    editor.buffer.deinit();
+    editor.buffer.deinit(); // Frees owned_original if set
     editor.buffer = PieceTable.init(allocator, new_content) catch return;
+    editor.buffer.owned_original = new_content; // Transfer ownership to PieceTable
     editor.cursor.moveTo(0);
     editor.scroll_line = 0;
     editor.modified = false;

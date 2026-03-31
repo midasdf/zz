@@ -2,12 +2,14 @@ const std = @import("std");
 
 pub const PieceTable = struct {
     original: []const u8,
+    owned_original: ?[]u8 = null, // Non-null if we allocated original (for file reopen)
     add_buf: std.ArrayList(u8),
     pieces: std.ArrayList(Piece),
     total_len: u32,
     allocator: std.mem.Allocator,
     undo_stack: std.ArrayList(UndoEntry),
     redo_stack: std.ArrayList(UndoEntry),
+    last_edit_pos: ?u32 = null, // For undo coalescing
 
     pub const Source = enum { original, add };
 
@@ -49,6 +51,7 @@ pub const PieceTable = struct {
     }
 
     pub fn deinit(self: *PieceTable) void {
+        if (self.owned_original) |o| self.allocator.free(o);
         self.pieces.deinit(self.allocator);
         self.add_buf.deinit(self.allocator);
         for (self.undo_stack.items) |*entry| entry.deinit(self.allocator);
@@ -100,6 +103,7 @@ pub const PieceTable = struct {
     }
 
     pub fn undo(self: *PieceTable) !bool {
+        self.last_edit_pos = null;
         if (self.undo_stack.items.len == 0) return false;
 
         const current_snapshot = try self.allocator.dupe(Piece, self.pieces.items);
@@ -143,7 +147,14 @@ pub const PieceTable = struct {
         if (text.len == 0) return;
         if (pos > self.total_len) return error.OutOfBounds;
 
-        try self.pushUndo();
+        // Coalesce: single-char inserts at consecutive positions share one undo entry
+        const is_coalesced = text.len == 1 and text[0] != '\n' and
+            self.last_edit_pos != null and pos == self.last_edit_pos.? + 1 and
+            self.undo_stack.items.len > 0;
+        if (!is_coalesced) {
+            try self.pushUndo();
+        }
+        self.last_edit_pos = pos;
 
         const add_start: u32 = @intCast(self.add_buf.items.len);
         try self.add_buf.appendSlice(self.allocator, text);
@@ -206,6 +217,7 @@ pub const PieceTable = struct {
         if (len == 0) return;
         if (pos + len > self.total_len) return error.OutOfBounds;
 
+        self.last_edit_pos = null; // Break undo coalescing
         try self.pushUndo();
 
         const end = pos + len;
@@ -510,15 +522,27 @@ test "undo empty returns false" {
 test "multiple undo redo" {
     var buf = try PieceTable.init(std.testing.allocator, "");
     defer buf.deinit();
+    // Consecutive single-char inserts coalesce into one undo entry
     try buf.insert(0, "a");
     try buf.insert(1, "b");
     try buf.insert(2, "c");
     try expectContent(&buf, "abc");
 
-    _ = try buf.undo();
-    try expectContent(&buf, "ab");
-    _ = try buf.undo();
-    try expectContent(&buf, "a");
+    _ = try buf.undo(); // Undoes all coalesced inserts at once
+    try expectContent(&buf, "");
     _ = try buf.redo();
-    try expectContent(&buf, "ab");
+    try expectContent(&buf, "abc");
+}
+
+test "undo non-coalesced edits" {
+    var buf = try PieceTable.init(std.testing.allocator, "");
+    defer buf.deinit();
+    try buf.insert(0, "hello"); // Multi-char insert: own undo entry
+    try buf.insert(5, " world"); // Multi-char insert: own undo entry
+    try expectContent(&buf, "hello world");
+
+    _ = try buf.undo();
+    try expectContent(&buf, "hello");
+    _ = try buf.undo();
+    try expectContent(&buf, "");
 }
