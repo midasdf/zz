@@ -63,6 +63,9 @@ pub const LspClient = struct {
     msg_buf: std.ArrayList(u8),
     expected_content_length: ?usize,
 
+    // Document version counter for textDocument/didChange
+    doc_version: u32,
+
     // Track pending request IDs
     pending_completion_id: ?u32,
     pending_definition_id: ?u32,
@@ -86,6 +89,7 @@ pub const LspClient = struct {
             .read_pos = 0,
             .msg_buf = .{},
             .expected_content_length = null,
+            .doc_version = 1,
             .pending_completion_id = null,
             .pending_definition_id = null,
             .pending_hover_id = null,
@@ -109,7 +113,7 @@ pub const LspClient = struct {
         var child = std.process.Child.init(argv_buf[0..argc], self.allocator);
         child.stdin_behavior = .Pipe;
         child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Pipe;
+        child.stderr_behavior = .Ignore;
 
         try child.spawn();
         self.process = child;
@@ -132,7 +136,7 @@ pub const LspClient = struct {
             self.sendExit();
         }
 
-        // Kill process if still alive
+        // Close pipes and wait/kill process
         if (self.process) |*proc| {
             if (proc.stdin) |f| f.close();
             proc.stdin = null;
@@ -140,7 +144,7 @@ pub const LspClient = struct {
             proc.stdout = null;
             if (proc.stderr) |f| f.close();
             proc.stderr = null;
-            _ = proc.kill() catch {};
+            _ = proc.wait() catch proc.kill() catch {};
         }
         self.process = null;
 
@@ -185,15 +189,24 @@ pub const LspClient = struct {
         self.sendNotificationWithTextContent("textDocument/didOpen", params_prefix, content, suffix);
     }
 
-    pub fn didChange(self: *LspClient, uri: []const u8, version: u32, content: []const u8) void {
+    pub fn didChange(self: *LspClient, uri: []const u8, content: []const u8) void {
+        self.doc_version += 1;
         var params_buf: [256]u8 = undefined;
         const params_prefix = std.fmt.bufPrint(&params_buf,
             \\{{"textDocument":{{"uri":"{s}","version":{d}}},"contentChanges":[{{"text":"
-        , .{ uri, version }) catch return;
+        , .{ uri, self.doc_version }) catch return;
 
-        const suffix = "\"}}]}}";
+        const suffix = "\"}]}";
 
         self.sendNotificationWithTextContent("textDocument/didChange", params_prefix, content, suffix);
+    }
+
+    pub fn didClose(self: *LspClient, uri: []const u8) void {
+        var params_buf: [1024]u8 = undefined;
+        const params = std.fmt.bufPrint(&params_buf,
+            \\{{"textDocument":{{"uri":"{s}"}}}}
+        , .{uri}) catch return;
+        self.sendNotification("textDocument/didClose", params);
     }
 
     pub fn didSave(self: *LspClient, uri: []const u8) void {
@@ -247,6 +260,12 @@ pub const LspClient = struct {
         };
         if (n == 0) return;
         self.read_pos += n;
+
+        // Consolidate: if msg_buf has partial data, append new read_buf data
+        if (self.msg_buf.items.len > 0 and self.read_pos > 0) {
+            self.msg_buf.appendSlice(self.allocator, self.read_buf[0..self.read_pos]) catch return;
+            self.read_pos = 0;
+        }
 
         // Process complete messages from buffer
         self.extractMessages();
@@ -308,9 +327,10 @@ pub const LspClient = struct {
         if (self.msg_buf.items.len > 0) {
             // Shift msg_buf
             if (count >= self.msg_buf.items.len) {
+                const msg_len = self.msg_buf.items.len;
                 self.msg_buf.clearRetainingCapacity();
                 // Also consume any remaining read_buf data
-                const remaining = count - self.msg_buf.items.len;
+                const remaining = count - msg_len;
                 if (remaining > 0 and remaining <= self.read_pos) {
                     const left = self.read_pos - remaining;
                     if (left > 0) {
@@ -361,7 +381,7 @@ pub const LspClient = struct {
             self.handleNotification(method, obj);
         } else if (obj.get("id")) |id_val| {
             const id: u32 = switch (id_val) {
-                .integer => |i| @intCast(@as(u64, @bitCast(i))),
+                .integer => |i| if (i >= 0 and i <= std.math.maxInt(u32)) @intCast(@as(u64, @bitCast(i))) else return,
                 else => return,
             };
             self.handleResponse(id, obj);
@@ -916,7 +936,7 @@ fn parseContentLength(header: []const u8) ?usize {
 fn jsonGetU32(obj: std.json.ObjectMap, key: []const u8) ?u32 {
     const val = obj.get(key) orelse return null;
     return switch (val) {
-        .integer => |i| @intCast(@as(u64, @bitCast(i))),
+        .integer => |i| if (i >= 0 and i <= std.math.maxInt(u32)) @intCast(@as(u64, @bitCast(i))) else null,
         else => null,
     };
 }

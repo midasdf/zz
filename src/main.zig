@@ -160,7 +160,7 @@ pub fn main() !void {
 
                             .key_press => |ke| {
                                 if (mode != .normal) {
-                                    handleOverlayKey(&mode, &overlay, &editor, ke, allocator, &file_list, &filtered_display);
+                                    handleOverlayKey(&mode, &overlay, &editor, ke, allocator, &file_list, &filtered_display, &lsp_client);
                                 } else {
                                     const mod = keymap.modFromWindow(ke.modifiers);
                                     if (keymap.mapKey(ke.keysym, mod)) |action| {
@@ -272,7 +272,7 @@ pub fn main() !void {
                             if (lsp.uriToPath(loc.uri)) |p| {
                                 if (editor.file_path) |current| {
                                     if (!std.mem.eql(u8, p, current)) {
-                                        openFile(&editor, allocator, p);
+                                        openFile(&editor, allocator, p, &lsp_client);
                                     }
                                 }
                                 const target_off = editor.buffer.lineToOffset(loc.line) + loc.col;
@@ -435,7 +435,7 @@ fn notifyLspChange(editor: *EditorView, lsp_client: *lsp.LspClient, allocator: s
     const uri = lsp.formatUri(path, &uri_buf);
     const content = editor.buffer.collectContent(allocator) catch return;
     defer allocator.free(content);
-    lsp_client.didChange(uri, 0, content);
+    lsp_client.didChange(uri, content);
 }
 
 fn moveVertical(editor: *EditorView, delta: i32, extend: bool) void {
@@ -589,6 +589,7 @@ fn handleOverlayKey(
     allocator: std.mem.Allocator,
     file_list: *?[][]const u8,
     filtered_display: *std.ArrayList([]const u8),
+    lsp_client: *lsp.LspClient,
 ) void {
     const keysym = ke.keysym;
 
@@ -603,7 +604,7 @@ fn handleOverlayKey(
         switch (mode.*) {
             .file_finder => {
                 if (overlay.selectedItem()) |path| {
-                    openFile(editor, allocator, path);
+                    openFile(editor, allocator, path, lsp_client);
                 }
             },
             .goto_line => {
@@ -724,7 +725,7 @@ fn findNext(editor: *EditorView, query: []const u8) void {
 
 // ── Open a file into the editor ───────────────────────────────────
 
-fn openFile(editor: *EditorView, allocator: std.mem.Allocator, path: []const u8) void {
+fn openFile(editor: *EditorView, allocator: std.mem.Allocator, path: []const u8, lsp_client: ?*lsp.LspClient) void {
     const new_content = std.fs.cwd().readFileAlloc(allocator, path, 100 * 1024 * 1024) catch return;
 
     // Init new buffer BEFORE deiniting old — if init fails, keep old buffer
@@ -733,6 +734,15 @@ fn openFile(editor: *EditorView, allocator: std.mem.Allocator, path: []const u8)
         return;
     };
     new_buf.owned_original = new_content;
+
+    // Send didClose for the old file before switching
+    if (lsp_client) |lc| {
+        if (editor.file_path) |old_path| {
+            var old_uri_buf: [4096]u8 = undefined;
+            const old_uri = lsp.formatUri(old_path, &old_uri_buf);
+            lc.didClose(old_uri);
+        }
+    }
 
     editor.buffer.deinit(); // Safe: new buffer is ready
     editor.buffer = new_buf;
@@ -743,6 +753,19 @@ fn openFile(editor: *EditorView, allocator: std.mem.Allocator, path: []const u8)
     editor.file_path = allocator.dupe(u8, path) catch null;
     editor.initHighlighting();
     editor.markAllDirty();
+
+    // Send didOpen for the new file
+    if (lsp_client) |lc| {
+        if (editor.file_path) |new_path| {
+            var uri_buf: [4096]u8 = undefined;
+            const uri = lsp.formatUri(new_path, &uri_buf);
+            const lsp_content = editor.buffer.collectContent(allocator) catch null;
+            if (lsp_content) |c| {
+                defer allocator.free(c);
+                lc.didOpen(uri, lsp.languageId(new_path) orelse "text", c);
+            }
+        }
+    }
 }
 
 // ── Execute a command palette command ─────────────────────────────
