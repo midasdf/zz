@@ -47,6 +47,10 @@ pub const Action = enum {
     finder_files,
     find,
     goto_line,
+    // Tabs
+    next_tab,
+    prev_tab,
+    close_tab,
     // LSP
     goto_definition,
     hover,
@@ -64,6 +68,8 @@ pub fn modFromWindow(mods: Window.Modifiers) Modifier {
 pub fn mapKey(keysym: u32, mods: Modifier) ?Action {
     // Ctrl+key bindings (normalize to lowercase for CapsLock compat)
     if (mods == .ctrl) {
+        // Ctrl+Tab -> next tab
+        if (keysym == Window.XK_Tab) return .next_tab;
         const k = if (keysym >= 'A' and keysym <= 'Z') keysym + 32 else keysym;
         return switch (k) {
             'a' => .select_all,
@@ -73,6 +79,7 @@ pub fn mapKey(keysym: u32, mods: Modifier) ?Action {
             'z' => .undo,
             's' => .save,
             'q' => .quit,
+            'w' => .close_tab,
             'p' => .finder_files,
             'f' => .find,
             'g' => .goto_line,
@@ -80,6 +87,8 @@ pub fn mapKey(keysym: u32, mods: Modifier) ?Action {
         };
     }
     if (mods == .ctrl_shift) {
+        // Ctrl+Shift+Tab -> prev tab (XK_ISO_Left_Tab = 0xFE20)
+        if (keysym == Window.XK_Tab or keysym == Window.XK_ISO_Left_Tab) return .prev_tab;
         return switch (keysym) {
             'z', 'Z' => .redo,
             'p', 'P' => .command_palette,

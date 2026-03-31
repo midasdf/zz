@@ -55,6 +55,7 @@ pub const EditorView = struct {
     file_path: ?[]const u8 = null,
     cursor_visible: bool = true,
     lsp_diagnostics: []const Diagnostic = &.{},
+    y_offset: u32 = 0, // Pixel offset for tab bar
 
     pub fn init(allocator: std.mem.Allocator, content: []const u8) !EditorView {
         var buffer = try PieceTable.init(allocator, content);
@@ -100,8 +101,9 @@ pub const EditorView = struct {
     pub fn updateViewport(self: *EditorView, win_width: u32, win_height: u32, font: *const FontFace) !void {
         if (font.cell_height == 0 or font.cell_width == 0) return;
 
-        // Reserve 2 rows for status bar (status line + separator)
-        const total_rows = win_height / font.cell_height;
+        // Available height = window height minus tab bar offset and status bar (2 rows)
+        const avail_h = if (win_height > self.y_offset) win_height - self.y_offset else 0;
+        const total_rows = avail_h / font.cell_height;
         self.visible_rows = if (total_rows > 2) total_rows - 2 else 1;
 
         // Cols = (width - gutter - left_pad) / cell_width
@@ -304,7 +306,7 @@ pub const EditorView = struct {
         var screen_row: u32 = 0;
         while (screen_row < self.visible_rows) : (screen_row += 1) {
             const doc_line = self.scroll_line + screen_row;
-            const row_y = screen_row * cell_h;
+            const row_y = self.y_offset + screen_row * cell_h;
 
             // Skip clean rows -- but we must advance byte_offset past this line
             if (screen_row < self.dirty_rows.len and !self.dirty_rows[screen_row]) {
@@ -545,7 +547,7 @@ pub const EditorView = struct {
         const win_w = renderer.width;
 
         // Status bar occupies the last 2 rows: 1px separator + 1 row of text
-        const status_y = self.visible_rows * cell_h;
+        const status_y = self.y_offset + self.visible_rows * cell_h;
         const bar_y = status_y + 1;
 
         // Separator line (1px)
@@ -614,8 +616,11 @@ pub const EditorView = struct {
         const cell_h = font.cell_height;
         if (cell_w == 0 or cell_h == 0) return 0;
 
+        // Adjust for tab bar offset
+        const adj_y = py - @as(i32, @intCast(self.y_offset));
+
         // Determine screen row from pixel y
-        const screen_row: u32 = if (py < 0) 0 else @min(@as(u32, @intCast(@divTrunc(py, @as(i32, @intCast(cell_h))))), self.visible_rows -| 1);
+        const screen_row: u32 = if (adj_y < 0) 0 else @min(@as(u32, @intCast(@divTrunc(adj_y, @as(i32, @intCast(cell_h))))), self.visible_rows -| 1);
         const doc_line = self.scroll_line + screen_row;
 
         const total_lines = self.buffer.lineCount();
@@ -724,6 +729,86 @@ pub const EditorView = struct {
         return @max(3, digits);
     }
 };
+
+// ── Tab bar rendering ─────────────────────────────────────────────
+const TabManager = @import("tabs.zig").TabManager;
+
+/// Compute the tab bar height in pixels.
+pub fn tabBarHeight(font: *const FontFace) u32 {
+    return font.cell_height + 6; // cell height + top accent (2px) + padding (4px)
+}
+
+/// Render the tab bar at the top of the window.
+pub fn renderTabBar(
+    tab_mgr: *const TabManager,
+    renderer: *Renderer,
+    font: *FontFace,
+) void {
+    const cell_w = font.cell_width;
+    const cell_h = font.cell_height;
+    if (cell_w == 0 or cell_h == 0) return;
+
+    const bar_h = tabBarHeight(font);
+    const win_w = renderer.width;
+
+    // Full bar background
+    renderer.fillRect(0, 0, win_w, bar_h, theme.mantle);
+
+    // Bottom separator
+    renderer.fillRect(0, bar_h - 1, win_w, 1, theme.surface2);
+
+    // Render each tab
+    var x: u32 = 2;
+    for (tab_mgr.tabs.items, 0..) |tab, i| {
+        const is_active = (i == tab_mgr.active);
+        const bg = if (is_active) theme.base else theme.mantle;
+        const fg = if (is_active) theme.text else theme.overlay0;
+
+        // Tab label
+        const label = if (tab.file_path) |p| basename(p) else "[untitled]";
+        const label_len: u32 = @intCast(label.len);
+        const mod_extra: u32 = if (tab.modified) 2 else 0; // " +"
+        const tab_w = (label_len + mod_extra + 2) * cell_w; // +2 for left/right padding
+
+        // Tab background (leave 1px gap at bottom for separator)
+        renderer.fillRect(x, 0, tab_w, bar_h - 1, bg);
+
+        // Active tab: lavender accent line at top (2px)
+        if (is_active) {
+            renderer.fillRect(x, 0, tab_w, 2, theme.lavender);
+        }
+
+        // Tab label text
+        const text_y: u32 = 3; // 2px accent + 1px padding
+        var tx = x + cell_w; // 1-cell left padding
+        for (label) |ch| {
+            if (font.getGlyph(ch)) |glyph| {
+                const gx: i32 = @intCast(tx);
+                const gy: i32 = @as(i32, @intCast(text_y)) + font.ascent - @as(i32, glyph.bearing_y);
+                renderer.drawGlyph(glyph, gx, gy, fg);
+            } else |_| {}
+            tx += cell_w;
+        }
+
+        // Modified indicator " +" in green
+        if (tab.modified) {
+            if (font.getGlyph(' ')) |_| {} else |_| {}
+            tx += cell_w; // space
+            if (font.getGlyph('+')) |glyph| {
+                const gx: i32 = @intCast(tx);
+                const gy: i32 = @as(i32, @intCast(text_y)) + font.ascent - @as(i32, glyph.bearing_y);
+                renderer.drawGlyph(glyph, gx, gy, theme.green);
+            } else |_| {}
+        }
+
+        x += tab_w + 2; // 2px gap between tabs
+    }
+}
+
+fn basename(path: []const u8) []const u8 {
+    if (std.mem.lastIndexOfScalar(u8, path, '/')) |idx| return path[idx + 1 ..];
+    return path;
+}
 
 fn syntaxColor(kind: SyntaxKind) Color {
     return switch (kind) {

@@ -79,6 +79,7 @@ pub const ResizeEvent = struct {
 
 pub const XK_BackSpace = 0xFF08;
 pub const XK_Tab = 0xFF09;
+pub const XK_ISO_Left_Tab = 0xFE20;
 pub const XK_Return = 0xFF0D;
 pub const XK_Escape = 0xFF1B;
 pub const XK_Home = 0xFF50;
@@ -108,6 +109,7 @@ fn isSpecialKeysym(keysym: u32) bool {
     return switch (keysym) {
         XK_BackSpace,
         XK_Tab,
+        XK_ISO_Left_Tab,
         XK_Return,
         XK_Escape,
         XK_Home,

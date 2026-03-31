@@ -5,7 +5,9 @@ const FontFace = @import("ui/font.zig").FontFace;
 const render_mod = @import("ui/render.zig");
 const Renderer = render_mod.Renderer;
 const EditorView = @import("editor/view.zig").EditorView;
+const view_mod = @import("editor/view.zig");
 const PieceTable = @import("editor/buffer.zig").PieceTable;
+const TabManager = @import("editor/tabs.zig").TabManager;
 const keymap = @import("input/keymap.zig");
 const Overlay = @import("ui/overlay.zig").Overlay;
 const fuzzy = @import("core/fuzzy.zig");
@@ -64,21 +66,25 @@ pub fn main() !void {
     var font = try FontFace.init(allocator, font_path, 16);
     defer font.deinit();
 
-    // Init editor view
-    var editor = try EditorView.init(allocator, content);
-    defer editor.deinit();
-    if (file_path) |p| {
-        editor.file_path = try allocator.dupe(u8, p);
-    }
-    editor.initHighlighting();
-    try editor.updateViewport(win.width, win.height, &font);
+    // Tab manager
+    var tab_mgr = TabManager.init(allocator);
+    defer tab_mgr.deinit();
+
+    // Compute tab bar height
+    const tab_bar_h = view_mod.tabBarHeight(&font);
+
+    // Create initial tab
+    const initial_view = try tab_mgr.addTab(content, file_path);
+    initial_view.y_offset = tab_bar_h;
+    initial_view.initHighlighting();
+    try initial_view.updateViewport(win.width, win.height, &font);
 
     // LSP client
     var lsp_client = lsp.LspClient.init(allocator);
     defer lsp_client.deinit();
 
     // Start LSP server if applicable
-    if (editor.file_path) |path| {
+    if (initial_view.file_path) |path| {
         if (lsp.serverCommand(path)) |cmd| {
             var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
             const cwd_path = std.fs.cwd().realpath(".", &cwd_buf) catch null;
@@ -87,7 +93,7 @@ pub fn main() !void {
                 // Send didOpen
                 var uri_buf: [4096]u8 = undefined;
                 const uri = lsp.formatUri(path, &uri_buf);
-                const lsp_content = editor.buffer.collectContent(allocator) catch null;
+                const lsp_content = initial_view.buffer.collectContent(allocator) catch null;
                 if (lsp_content) |c| {
                     defer allocator.free(c);
                     lsp_client.didOpen(uri, lsp.languageId(path) orelse "text", c);
@@ -143,9 +149,12 @@ pub fn main() !void {
     var running = true;
     var mouse_dragging = false;
 
-    // Initial render — pass diagnostics to editor
-    editor.lsp_diagnostics = lsp_client.diagnostics.items;
-    renderFrame(&editor, &win, &font, &overlay);
+    // Initial render
+    {
+        const editor = tab_mgr.activeView();
+        editor.lsp_diagnostics = lsp_client.diagnostics.items;
+        renderFrame(&tab_mgr, &win, &font, &overlay);
+    }
 
     while (running) {
         var events: [16]std.os.linux.epoll_event = undefined;
@@ -155,12 +164,13 @@ pub fn main() !void {
             switch (ev.data.u32) {
                 0 => { // xcb events
                     while (win.pollEvent()) |event| {
+                        const editor = tab_mgr.activeView();
                         switch (event) {
                             .close => running = false,
 
                             .key_press => |ke| {
                                 if (mode != .normal) {
-                                    handleOverlayKey(&mode, &overlay, &editor, ke, allocator, &file_list, &filtered_display, &lsp_client);
+                                    handleOverlayKey(&mode, &overlay, &tab_mgr, ke, allocator, &file_list, &filtered_display, &lsp_client, &font);
                                 } else {
                                     const mod = keymap.modFromWindow(ke.modifiers);
                                     if (keymap.mapKey(ke.keysym, mod)) |action| {
@@ -169,9 +179,21 @@ pub fn main() !void {
                                             .finder_files => openFileFinder(&mode, &overlay, allocator, &file_list, &filtered_display),
                                             .find => openSearch(&mode, &overlay),
                                             .goto_line => openGotoLine(&mode, &overlay),
-                                            else => handleAction(&editor, &win, action, &lsp_client, allocator),
+                                            .next_tab => {
+                                                tab_mgr.nextTab();
+                                                tab_mgr.activeView().markAllDirty();
+                                            },
+                                            .prev_tab => {
+                                                tab_mgr.prevTab();
+                                                tab_mgr.activeView().markAllDirty();
+                                            },
+                                            .close_tab => {
+                                                tab_mgr.closeActive();
+                                                tab_mgr.activeView().markAllDirty();
+                                            },
+                                            else => handleAction(editor, &win, action, &lsp_client, allocator),
                                         }
-                                        resetCursorBlink(&editor);
+                                        resetCursorBlink(editor);
                                     }
                                 }
                             },
@@ -183,29 +205,37 @@ pub fn main() !void {
                                     editor.markAllDirty();
                                 } else {
                                     editor.insertAtCursor(te.slice()) catch {};
-                                    notifyLspChange(&editor, &lsp_client, allocator);
-                                    resetCursorBlink(&editor);
+                                    notifyLspChange(editor, &lsp_client, allocator);
+                                    resetCursorBlink(editor);
                                 }
                             },
 
                             .resize => |r| {
                                 win.resize(r.width, r.height) catch {};
-                                editor.updateViewport(r.width, r.height, &font) catch {};
+                                // Update viewport for all tabs
+                                for (tab_mgr.tabs.items) |tab| {
+                                    tab.updateViewport(r.width, r.height, &font) catch {};
+                                }
                             },
 
                             .expose => editor.markAllDirty(),
 
                             .scroll => |s| {
-                                handleScroll(&editor, s.delta);
+                                handleScroll(editor, s.delta);
                             },
 
                             .mouse_press => |me| {
                                 if (me.button == .left) {
-                                    const pos = editor.pixelToPosition(me.x, me.y, &font);
-                                    editor.cursor.moveTo(pos);
-                                    mouse_dragging = true;
-                                    editor.markAllDirty();
-                                    resetCursorBlink(&editor);
+                                    // Check if click is in tab bar area
+                                    if (me.y >= 0 and me.y < @as(i32, @intCast(tab_bar_h))) {
+                                        handleTabBarClick(&tab_mgr, me.x, &font);
+                                    } else {
+                                        const pos = editor.pixelToPosition(me.x, me.y, &font);
+                                        editor.cursor.moveTo(pos);
+                                        mouse_dragging = true;
+                                        editor.markAllDirty();
+                                        resetCursorBlink(editor);
+                                    }
                                 } else if (me.button == .middle) {
                                     win.requestPrimary();
                                 }
@@ -214,7 +244,6 @@ pub fn main() !void {
                             .mouse_release => |me| {
                                 if (me.button == .left) {
                                     mouse_dragging = false;
-                                    // Set PRIMARY selection if text selected
                                     if (editor.getSelectedText()) |text| {
                                         win.setClipboard(text);
                                     }
@@ -231,9 +260,9 @@ pub fn main() !void {
 
                             .paste => |pe| {
                                 editor.insertAtCursor(pe.data) catch {};
-                                notifyLspChange(&editor, &lsp_client, allocator);
+                                notifyLspChange(editor, &lsp_client, allocator);
                                 pe.deinit();
-                                resetCursorBlink(&editor);
+                                resetCursorBlink(editor);
                             },
 
                             .focus_in => {
@@ -250,10 +279,10 @@ pub fn main() !void {
                 },
 
                 1 => { // cursor blink timer
+                    const editor = tab_mgr.activeView();
                     var buf: [8]u8 = undefined;
                     _ = std.posix.read(timer_fd, &buf) catch {};
                     editor.cursor_visible = !editor.cursor_visible;
-                    // Only dirty the cursor row
                     const lc = editor.buffer.offsetToLineCol(editor.cursor.primary().head);
                     if (lc.line >= editor.scroll_line) {
                         editor.markRowDirty(lc.line - editor.scroll_line);
@@ -261,6 +290,7 @@ pub fn main() !void {
                 },
 
                 2 => { // LSP
+                    const editor = tab_mgr.activeView();
                     lsp_client.processMessages();
                     editor.lsp_diagnostics = lsp_client.diagnostics.items;
                     editor.markAllDirty();
@@ -275,15 +305,16 @@ pub fn main() !void {
                                 else
                                     true;
                                 if (should_open) {
-                                    openFile(&editor, allocator, p, &lsp_client);
+                                    openFileInTab(&tab_mgr, allocator, p, &lsp_client, &font);
                                 }
-                                // Only move cursor if current file matches the target
-                                const is_target = if (editor.file_path) |fp| std.mem.eql(u8, fp, p) else false;
+                                // Move cursor in the (now-active) tab
+                                const active = tab_mgr.activeView();
+                                const is_target = if (active.file_path) |fp| std.mem.eql(u8, fp, p) else false;
                                 if (is_target) {
-                                    const target_off = editor.buffer.lineToOffset(loc.line) + loc.col;
-                                    editor.cursor.moveTo(@min(target_off, editor.buffer.total_len));
-                                    editor.ensureCursorVisible();
-                                    editor.markAllDirty();
+                                    const target_off = active.buffer.lineToOffset(loc.line) + loc.col;
+                                    active.cursor.moveTo(@min(target_off, active.buffer.total_len));
+                                    active.ensureCursorVisible();
+                                    active.markAllDirty();
                                 }
                             }
                         }
@@ -294,8 +325,11 @@ pub fn main() !void {
             }
         }
 
-        editor.lsp_diagnostics = lsp_client.diagnostics.items;
-        renderFrame(&editor, &win, &font, &overlay);
+        {
+            const editor = tab_mgr.activeView();
+            editor.lsp_diagnostics = lsp_client.diagnostics.items;
+            renderFrame(&tab_mgr, &win, &font, &overlay);
+        }
     }
 }
 
@@ -432,6 +466,7 @@ fn handleAction(editor: *EditorView, win: *Window, action: keymap.Action, lsp_cl
         },
         // These are handled before reaching handleAction
         .command_palette, .finder_files, .find, .goto_line => {},
+        .next_tab, .prev_tab, .close_tab => {},
     }
 }
 
@@ -517,13 +552,17 @@ fn saveFile(editor: *EditorView) void {
     editor.markAllDirty(); // Redraw status bar
 }
 
-fn renderFrame(editor: *EditorView, win: *Window, font: *FontFace, overlay: *Overlay) void {
+fn renderFrame(tab_mgr: *TabManager, win: *Window, font: *FontFace, overlay: *Overlay) void {
     var renderer = Renderer{
         .buffer = win.getBuffer(),
         .stride = win.stride,
         .width = win.width,
         .height = win.height,
     };
+    // Render tab bar first
+    view_mod.renderTabBar(tab_mgr, &renderer, font);
+    // Render active editor content below
+    const editor = tab_mgr.activeView();
     editor.render(&renderer, font);
     overlay.render(&renderer, font);
     win.markAllDirty();
@@ -590,14 +629,16 @@ fn openGotoLine(mode: *EditorMode, overlay: *Overlay) void {
 fn handleOverlayKey(
     mode: *EditorMode,
     overlay: *Overlay,
-    editor: *EditorView,
+    tab_mgr: *TabManager,
     ke: window_mod.KeyEvent,
     allocator: std.mem.Allocator,
     file_list: *?[][]const u8,
     filtered_display: *std.ArrayList([]const u8),
     lsp_client: *lsp.LspClient,
+    font: *const FontFace,
 ) void {
     const keysym = ke.keysym;
+    const editor = tab_mgr.activeView();
 
     if (keysym == window_mod.XK_Escape) {
         overlay.close();
@@ -610,7 +651,7 @@ fn handleOverlayKey(
         switch (mode.*) {
             .file_finder => {
                 if (overlay.selectedItem()) |path| {
-                    openFile(editor, allocator, path, lsp_client);
+                    openFileInTab(tab_mgr, allocator, path, lsp_client, font);
                 }
             },
             .goto_line => {
@@ -635,7 +676,7 @@ fn handleOverlayKey(
         }
         overlay.close();
         mode.* = .normal;
-        editor.markAllDirty();
+        tab_mgr.activeView().markAllDirty();
         return;
     }
 
@@ -729,49 +770,66 @@ fn findNext(editor: *EditorView, query: []const u8) void {
     }
 }
 
-// ── Open a file into the editor ───────────────────────────────────
+// ── Open a file in a tab (reuse existing or create new) ──────────
 
-fn openFile(editor: *EditorView, allocator: std.mem.Allocator, path: []const u8, lsp_client: ?*lsp.LspClient) void {
-    const new_content = std.fs.cwd().readFileAlloc(allocator, path, 100 * 1024 * 1024) catch return;
-
-    // Init new buffer BEFORE deiniting old — if init fails, keep old buffer
-    var new_buf = PieceTable.init(allocator, new_content) catch {
-        allocator.free(new_content);
+fn openFileInTab(tab_mgr: *TabManager, allocator: std.mem.Allocator, path: []const u8, lsp_client: ?*lsp.LspClient, font: *const FontFace) void {
+    // Check if already open in a tab
+    if (tab_mgr.findByPath(path)) |idx| {
+        tab_mgr.switchTo(idx);
+        tab_mgr.activeView().markAllDirty();
         return;
-    };
-    new_buf.owned_original = new_content;
-
-    // Send didClose for the old file before switching
-    if (lsp_client) |lc| {
-        if (editor.file_path) |old_path| {
-            var old_uri_buf: [4096]u8 = undefined;
-            const old_uri = lsp.formatUri(old_path, &old_uri_buf);
-            lc.didClose(old_uri);
-        }
     }
 
-    editor.buffer.deinit(); // Safe: new buffer is ready
-    editor.buffer = new_buf;
-    editor.cursor.moveTo(0);
-    editor.scroll_line = 0;
-    editor.modified = false;
-    if (editor.file_path) |old| allocator.free(old);
-    editor.file_path = allocator.dupe(u8, path) catch null;
-    editor.initHighlighting();
-    editor.markAllDirty();
+    // Read the file
+    const new_content = std.fs.cwd().readFileAlloc(allocator, path, 100 * 1024 * 1024) catch return;
+    defer allocator.free(new_content);
 
-    // Send didOpen for the new file
+    // Create a new tab
+    const tab_bar_h = view_mod.tabBarHeight(font);
+    const view = tab_mgr.addTab(new_content, path) catch return;
+    view.y_offset = tab_bar_h;
+    view.initHighlighting();
+
+    // Send didOpen for the new file to LSP
     if (lsp_client) |lc| {
-        if (editor.file_path) |new_path| {
+        if (view.file_path) |new_path| {
             var uri_buf: [4096]u8 = undefined;
             const uri = lsp.formatUri(new_path, &uri_buf);
-            const lsp_content = editor.buffer.collectContent(allocator) catch null;
+            const lsp_content = view.buffer.collectContent(allocator) catch null;
             if (lsp_content) |c| {
                 defer allocator.free(c);
                 lc.didOpen(uri, lsp.languageId(new_path) orelse "text", c);
             }
         }
     }
+}
+
+// ── Handle click on tab bar ──────────────────────────────────────
+
+fn handleTabBarClick(tab_mgr: *TabManager, click_x: i32, font: *const FontFace) void {
+    const cell_w = font.cell_width;
+    if (cell_w == 0) return;
+
+    var x: u32 = 2;
+    for (tab_mgr.tabs.items, 0..) |tab, i| {
+        const label = if (tab.file_path) |p| fileBasename(p) else "[untitled]";
+        const label_len: u32 = @intCast(label.len);
+        const mod_extra: u32 = if (tab.modified) 2 else 0;
+        const tab_w = (label_len + mod_extra + 2) * cell_w;
+
+        if (click_x >= @as(i32, @intCast(x)) and click_x < @as(i32, @intCast(x + tab_w))) {
+            tab_mgr.switchTo(i);
+            tab_mgr.activeView().markAllDirty();
+            return;
+        }
+
+        x += tab_w + 2;
+    }
+}
+
+fn fileBasename(path: []const u8) []const u8 {
+    if (std.mem.lastIndexOfScalar(u8, path, '/')) |idx| return path[idx + 1 ..];
+    return path;
 }
 
 // ── Execute a command palette command ─────────────────────────────
