@@ -195,11 +195,23 @@ pub const Highlighter = struct {
     fn loadQuery(self: *Highlighter, query_dir: []const u8) void {
         const lang = self.language orelse return;
 
-        // Build path: /usr/share/tree-sitter/queries/{lang}/highlights.scm
+        // Try bundled queries first, then system path
         var path_buf: [256]u8 = undefined;
-        const path = std.fmt.bufPrint(&path_buf, "/usr/share/tree-sitter/queries/{s}/highlights.scm", .{query_dir}) catch return;
+        const file = blk: {
+            // 1. Bundled: queries/{lang}/highlights.scm (relative to executable)
+            const bundled_path = std.fmt.bufPrint(&path_buf, "queries/{s}/highlights.scm", .{query_dir}) catch break :blk null;
+            if (std.fs.cwd().openFile(bundled_path, .{})) |f| break :blk f else |_| {}
 
-        const file = std.fs.cwd().openFile(path, .{}) catch return;
+            // 2. Relative to executable directory
+            const exe_dir = std.fs.selfExeDirPath(&path_buf) catch break :blk null;
+            var path_buf2: [512]u8 = undefined;
+            const exe_path = std.fmt.bufPrint(&path_buf2, "{s}/../queries/{s}/highlights.scm", .{ exe_dir, query_dir }) catch break :blk null;
+            if (std.fs.cwd().openFile(exe_path, .{})) |f| break :blk f else |_| {}
+
+            // 3. System: /usr/share/tree-sitter/queries/{lang}/highlights.scm
+            const sys_path = std.fmt.bufPrint(&path_buf, "/usr/share/tree-sitter/queries/{s}/highlights.scm", .{query_dir}) catch break :blk null;
+            break :blk std.fs.cwd().openFile(sys_path, .{}) catch null;
+        } orelse return;
         defer file.close();
 
         const source = file.readToEndAlloc(self.allocator, 1024 * 1024) catch return;
@@ -215,6 +227,15 @@ pub const Highlighter = struct {
             &error_offset,
             &error_type,
         );
+
+        if (self.query == null and error_type != ts.TSQueryErrorNone) {
+            // Query parse failed — log to stderr for debugging
+            const stderr = std.posix.STDERR_FILENO;
+            _ = std.posix.write(stderr, "zz: tree-sitter query error at offset ") catch {};
+            var err_buf: [32]u8 = undefined;
+            const err_str = std.fmt.bufPrint(&err_buf, "{d}\n", .{error_offset}) catch "";
+            _ = std.posix.write(stderr, err_str) catch {};
+        }
     }
 
     // ── Parsing ───────────────────────────────────────────────────────
