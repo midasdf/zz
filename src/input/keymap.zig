@@ -51,6 +51,10 @@ pub const Action = enum {
     next_tab,
     prev_tab,
     close_tab,
+    // Multi-cursor
+    select_next_occurrence,
+    select_all_occurrences,
+    escape,
     // LSP
     goto_definition,
     hover,
@@ -82,6 +86,7 @@ pub fn mapKey(keysym: u32, mods: Modifier) ?Action {
             'w' => .close_tab,
             'p' => .finder_files,
             'f' => .find,
+            'd' => .select_next_occurrence,
             'g' => .goto_line,
             else => null,
         };
@@ -92,6 +97,7 @@ pub fn mapKey(keysym: u32, mods: Modifier) ?Action {
         return switch (keysym) {
             'z', 'Z' => .redo,
             'p', 'P' => .command_palette,
+            'l', 'L' => .select_all_occurrences,
             else => null,
         };
     }
@@ -123,6 +129,7 @@ pub fn mapKey(keysym: u32, mods: Modifier) ?Action {
         Window.XK_Delete => .delete,
         Window.XK_Return => .enter,
         Window.XK_Tab => .tab,
+        Window.XK_Escape => .escape,
         Window.XK_F12 => .goto_definition,
         else => null,
     };

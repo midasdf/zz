@@ -1,6 +1,7 @@
 const std = @import("std");
 const PieceTable = @import("buffer.zig").PieceTable;
 const CursorState = @import("cursor.zig").CursorState;
+const Selection = @import("cursor.zig").Selection;
 pub const Highlighter = @import("highlight.zig").Highlighter;
 const SyntaxKind = @import("highlight.zig").SyntaxKind;
 const Renderer = @import("../ui/render.zig").Renderer;
@@ -153,80 +154,169 @@ pub const EditorView = struct {
     // ── Editing operations ─────────────────────────────────────────
 
     pub fn insertAtCursor(self: *EditorView, text: []const u8) !void {
-        const sel = self.cursor.primary();
+        const len: u32 = @intCast(text.len);
 
-        // If there is a selection, delete it first
-        if (sel.hasSelection()) {
-            try self.deleteSelection();
+        if (self.cursor.cursorCount() <= 1) {
+            // Fast path: single cursor
+            const sel = self.cursor.primary();
+            if (sel.hasSelection()) {
+                try self.deleteSelection();
+            }
+            const pos = self.cursor.primary().head;
+            try self.buffer.insert(pos, text);
+            self.highlighter.notifyEdit(&self.buffer, pos, pos, pos + len);
+            self.cursor.moveTo(pos + len);
+        } else {
+            // Multi-cursor: sort descending by head, process back-to-front
+            self.cursor.sortDescending();
+            for (self.cursor.cursors.items) |*sel| {
+                if (sel.hasSelection()) {
+                    const start = sel.start();
+                    const del_len = sel.end() - start;
+                    try self.buffer.delete(start, del_len);
+                    self.highlighter.notifyEdit(&self.buffer, start, start + del_len, start);
+                    sel.anchor = start;
+                    sel.head = start;
+                }
+                try self.buffer.insert(sel.head, text);
+                self.highlighter.notifyEdit(&self.buffer, sel.head, sel.head, sel.head + len);
+                sel.head += len;
+                sel.anchor = sel.head;
+            }
         }
 
-        const pos = self.cursor.primary().head;
-        try self.buffer.insert(pos, text);
-        self.highlighter.notifyEdit(&self.buffer, pos, pos, pos + @as(u32, @intCast(text.len)));
-        self.cursor.moveTo(pos + @as(u32, @intCast(text.len)));
         self.modified = true;
         self.ensureCursorVisible();
         self.markAllDirty();
     }
 
     pub fn backspace(self: *EditorView) !void {
-        const sel = self.cursor.primary();
-        if (sel.hasSelection()) {
-            try self.deleteSelection();
-            return;
+        if (self.cursor.cursorCount() <= 1) {
+            // Fast path: single cursor
+            const sel = self.cursor.primary();
+            if (sel.hasSelection()) {
+                try self.deleteSelection();
+                return;
+            }
+
+            const pos = sel.head;
+            if (pos == 0) return;
+
+            var prev = pos - 1;
+            while (prev > 0) {
+                const slice = self.buffer.contiguousSliceAt(prev);
+                if (slice.len == 0) break;
+                if ((slice[0] & 0xC0) != 0x80) break;
+                prev -= 1;
+            }
+
+            const del_len = pos - prev;
+            try self.buffer.delete(prev, del_len);
+            self.highlighter.notifyEdit(&self.buffer, prev, prev + del_len, prev);
+            self.cursor.moveTo(prev);
+        } else {
+            // Multi-cursor: sort descending, process back-to-front
+            self.cursor.sortDescending();
+            for (self.cursor.cursors.items) |*sel| {
+                if (sel.hasSelection()) {
+                    const start = sel.start();
+                    const del_len = sel.end() - start;
+                    try self.buffer.delete(start, del_len);
+                    self.highlighter.notifyEdit(&self.buffer, start, start + del_len, start);
+                    sel.anchor = start;
+                    sel.head = start;
+                    continue;
+                }
+                if (sel.head == 0) continue;
+                var prev = sel.head - 1;
+                while (prev > 0) {
+                    const slice = self.buffer.contiguousSliceAt(prev);
+                    if (slice.len == 0) break;
+                    if ((slice[0] & 0xC0) != 0x80) break;
+                    prev -= 1;
+                }
+                const del_len = sel.head - prev;
+                try self.buffer.delete(prev, del_len);
+                self.highlighter.notifyEdit(&self.buffer, prev, prev + del_len, prev);
+                sel.head = prev;
+                sel.anchor = prev;
+            }
         }
 
-        const pos = sel.head;
-        if (pos == 0) return;
-
-        // Find start of previous UTF-8 character
-        var prev = pos - 1;
-        while (prev > 0) {
-            const slice = self.buffer.contiguousSliceAt(prev);
-            if (slice.len == 0) break;
-            if ((slice[0] & 0xC0) != 0x80) break;
-            prev -= 1;
-        }
-
-        const del_len = pos - prev;
-        try self.buffer.delete(prev, del_len);
-        self.highlighter.notifyEdit(&self.buffer, prev, prev + del_len, prev);
-        self.cursor.moveTo(prev);
         self.modified = true;
         self.ensureCursorVisible();
         self.markAllDirty();
     }
 
     pub fn deleteForward(self: *EditorView) !void {
-        const sel = self.cursor.primary();
-        if (sel.hasSelection()) {
-            try self.deleteSelection();
-            return;
+        if (self.cursor.cursorCount() <= 1) {
+            // Fast path: single cursor
+            const sel = self.cursor.primary();
+            if (sel.hasSelection()) {
+                try self.deleteSelection();
+                return;
+            }
+
+            const pos = sel.head;
+            if (pos >= self.buffer.total_len) return;
+
+            const slice = self.buffer.contiguousSliceAt(pos);
+            if (slice.len == 0) return;
+
+            const byte_len = CursorState.utf8ByteLen(slice[0]);
+            try self.buffer.delete(pos, byte_len);
+            self.highlighter.notifyEdit(&self.buffer, pos, pos + byte_len, pos);
+        } else {
+            // Multi-cursor: sort descending, process back-to-front
+            self.cursor.sortDescending();
+            for (self.cursor.cursors.items) |*sel| {
+                if (sel.hasSelection()) {
+                    const start = sel.start();
+                    const del_len = sel.end() - start;
+                    try self.buffer.delete(start, del_len);
+                    self.highlighter.notifyEdit(&self.buffer, start, start + del_len, start);
+                    sel.anchor = start;
+                    sel.head = start;
+                    continue;
+                }
+                if (sel.head >= self.buffer.total_len) continue;
+                const slice = self.buffer.contiguousSliceAt(sel.head);
+                if (slice.len == 0) continue;
+                const byte_len = CursorState.utf8ByteLen(slice[0]);
+                try self.buffer.delete(sel.head, byte_len);
+                self.highlighter.notifyEdit(&self.buffer, sel.head, sel.head + byte_len, sel.head);
+            }
         }
 
-        const pos = sel.head;
-        if (pos >= self.buffer.total_len) return;
-
-        const slice = self.buffer.contiguousSliceAt(pos);
-        if (slice.len == 0) return;
-
-        const byte_len = CursorState.utf8ByteLen(slice[0]);
-        try self.buffer.delete(pos, byte_len);
-        self.highlighter.notifyEdit(&self.buffer, pos, pos + byte_len, pos);
-        // Cursor stays at same position
         self.modified = true;
         self.markAllDirty();
     }
 
     pub fn deleteSelection(self: *EditorView) !void {
-        const sel = self.cursor.primary();
-        if (!sel.hasSelection()) return;
+        if (self.cursor.cursorCount() <= 1) {
+            // Fast path: single cursor
+            const sel = self.cursor.primary();
+            if (!sel.hasSelection()) return;
 
-        const start = sel.start();
-        const end = sel.end();
-        try self.buffer.delete(start, end - start);
-        self.highlighter.notifyEdit(&self.buffer, start, end, start);
-        self.cursor.moveTo(start);
+            const start = sel.start();
+            const end = sel.end();
+            try self.buffer.delete(start, end - start);
+            self.highlighter.notifyEdit(&self.buffer, start, end, start);
+            self.cursor.moveTo(start);
+        } else {
+            // Multi-cursor: sort descending, process back-to-front
+            self.cursor.sortDescending();
+            for (self.cursor.cursors.items) |*sel| {
+                if (!sel.hasSelection()) continue;
+                const start = sel.start();
+                const del_len = sel.end() - start;
+                try self.buffer.delete(start, del_len);
+                self.highlighter.notifyEdit(&self.buffer, start, start + del_len, start);
+                sel.anchor = start;
+                sel.head = start;
+            }
+        }
+
         self.modified = true;
         self.ensureCursorVisible();
         self.markAllDirty();
@@ -257,6 +347,131 @@ pub const EditorView = struct {
         return result[0..written];
     }
 
+    // ── Multi-cursor: select next/all occurrence ──────────────────
+
+    pub fn selectNextOccurrence(self: *EditorView) !void {
+        const sel = self.cursor.primary();
+        if (!sel.hasSelection()) {
+            // Select current word under cursor
+            self.selectWordAtCursor();
+            return;
+        }
+
+        // Get selected text
+        const selected = self.getSelectedText() orelse return;
+        defer self.allocator.free(selected);
+        if (selected.len == 0) return;
+
+        // Search forward from the last cursor's end position
+        var search_from: u32 = 0;
+        for (self.cursor.cursors.items) |c| {
+            const e = c.end();
+            if (e > search_from) search_from = e;
+        }
+
+        const content = self.buffer.collectContent(self.allocator) catch return;
+        defer self.allocator.free(content);
+
+        const sel_len: u32 = @intCast(selected.len);
+
+        // Search forward from last cursor
+        if (search_from < content.len) {
+            if (std.mem.indexOf(u8, content[search_from..], selected)) |pos| {
+                const abs_pos: u32 = @intCast(search_from + pos);
+                // Check not already a cursor at this position
+                if (!self.hasCursorAt(abs_pos, abs_pos + sel_len)) {
+                    try self.cursor.addSelection(.{
+                        .anchor = abs_pos,
+                        .head = abs_pos + sel_len,
+                    });
+                    self.markAllDirty();
+                    return;
+                }
+            }
+        }
+
+        // Wrap around: search from beginning
+        if (std.mem.indexOf(u8, content, selected)) |pos| {
+            const abs_pos: u32 = @intCast(pos);
+            if (!self.hasCursorAt(abs_pos, abs_pos + sel_len)) {
+                try self.cursor.addSelection(.{
+                    .anchor = abs_pos,
+                    .head = abs_pos + sel_len,
+                });
+                self.markAllDirty();
+            }
+        }
+    }
+
+    pub fn selectAllOccurrences(self: *EditorView) !void {
+        const sel = self.cursor.primary();
+        if (!sel.hasSelection()) {
+            self.selectWordAtCursor();
+            if (!self.cursor.primary().hasSelection()) return;
+        }
+
+        const selected = self.getSelectedText() orelse return;
+        defer self.allocator.free(selected);
+        if (selected.len == 0) return;
+
+        const content = self.buffer.collectContent(self.allocator) catch return;
+        defer self.allocator.free(content);
+
+        const sel_len: u32 = @intCast(selected.len);
+
+        // Clear all cursors and re-add for every occurrence
+        self.cursor.cursors.clearRetainingCapacity();
+
+        var search_pos: usize = 0;
+        while (search_pos < content.len) {
+            if (std.mem.indexOf(u8, content[search_pos..], selected)) |pos| {
+                const abs_pos: u32 = @intCast(search_pos + pos);
+                self.cursor.cursors.append(self.allocator, .{
+                    .anchor = abs_pos,
+                    .head = abs_pos + sel_len,
+                }) catch break;
+                search_pos = search_pos + pos + selected.len;
+            } else break;
+        }
+
+        // Ensure at least one cursor
+        if (self.cursor.cursors.items.len == 0) {
+            self.cursor.cursors.append(self.allocator, .{ .anchor = 0, .head = 0 }) catch {};
+        }
+
+        self.markAllDirty();
+    }
+
+    fn selectWordAtCursor(self: *EditorView) void {
+        const pos = self.cursor.primary().head;
+        var start = pos;
+        while (start > 0) {
+            const slice = self.buffer.contiguousSliceAt(start - 1);
+            if (slice.len == 0) break;
+            if (!isWordChar(slice[0])) break;
+            start -= 1;
+        }
+        var end_pos = pos;
+        while (end_pos < self.buffer.total_len) {
+            const slice = self.buffer.contiguousSliceAt(end_pos);
+            if (slice.len == 0) break;
+            if (!isWordChar(slice[0])) break;
+            end_pos += 1;
+        }
+        if (start != end_pos) {
+            self.cursor.cursors.items[0] = .{ .anchor = start, .head = end_pos };
+            self.markAllDirty();
+        }
+    }
+
+    fn hasCursorAt(self: *const EditorView, anchor: u32, head: u32) bool {
+        for (self.cursor.cursors.items) |c| {
+            if (c.anchor == anchor and c.head == head) return true;
+            if (c.anchor == head and c.head == anchor) return true;
+        }
+        return false;
+    }
+
     // ── Rendering ──────────────────────────────────────────────────
 
     pub fn render(self: *EditorView, renderer: *Renderer, font: *FontFace) void {
@@ -268,15 +483,18 @@ pub const EditorView = struct {
         const code_x = gw; // code area starts right after gutter
         const total_lines = self.buffer.lineCount();
 
-        // Cursor position info
+        // Primary cursor position info (for current-line highlight + status bar)
         const cursor_pos = self.cursor.primary().head;
         const cursor_lc = self.buffer.offsetToLineCol(cursor_pos);
 
-        // Selection range
-        const sel = self.cursor.primary();
-        const has_sel = sel.hasSelection();
-        const sel_start = sel.start();
-        const sel_end = sel.end();
+        // Multi-cursor: check if ANY cursor has a selection
+        var has_sel = false;
+        for (self.cursor.cursors.items) |c| {
+            if (c.hasSelection()) {
+                has_sel = true;
+                break;
+            }
+        }
 
         // Walk through buffer to find the byte offset for scroll_line.
         // We compute it once via lineToOffset for the first visible line,
@@ -334,7 +552,7 @@ pub const EditorView = struct {
 
             // -- Code area --
             if (doc_line < total_lines) {
-                self.renderCodeLine(renderer, font, byte_offset, doc_line, screen_row, code_x, line_bg, has_sel, sel_start, sel_end);
+                self.renderCodeLine(renderer, font, byte_offset, doc_line, screen_row, code_x, line_bg, has_sel);
 
                 // -- Diagnostic underlines --
                 self.renderDiagnostics(renderer, font, doc_line, code_x, screen_row * cell_h);
@@ -343,11 +561,16 @@ pub const EditorView = struct {
                 byte_offset = self.advancePastLine(byte_offset);
             }
 
-            // -- Cursor (thin 2px beam) --
-            if (is_current_line and self.cursor_visible) {
-                const vcol = self.visualColAtOffset(cursor_lc.line, cursor_lc.col);
-                const cursor_px_x = code_x + self.left_pad + vcol * cell_w;
-                renderer.fillRect(cursor_px_x, row_y, 2, cell_h, theme.rosewater);
+            // -- Cursors (thin 2px beam) -- draw for ALL cursors on this line
+            if (self.cursor_visible) {
+                for (self.cursor.cursors.items) |c| {
+                    const clc = self.buffer.offsetToLineCol(c.head);
+                    if (clc.line == doc_line) {
+                        const vcol = self.visualColAtOffset(clc.line, clc.col);
+                        const cursor_px_x = code_x + self.left_pad + vcol * cell_w;
+                        renderer.fillRect(cursor_px_x, row_y, 2, cell_h, theme.rosewater);
+                    }
+                }
             }
 
             // Mark row as clean
@@ -408,8 +631,6 @@ pub const EditorView = struct {
         code_x: u32,
         line_bg: Color,
         has_sel: bool,
-        sel_start: u32,
-        sel_end: u32,
     ) void {
         _ = doc_line;
         const cell_w = font.cell_width;
@@ -433,7 +654,7 @@ pub const EditorView = struct {
 
             // Determine background: selection overrides current-line highlight
             var cell_bg = line_bg;
-            if (has_sel and offset >= sel_start and offset < sel_end) {
+            if (has_sel and self.isInAnySelection(offset)) {
                 cell_bg = theme.surface1;
             }
 
@@ -673,6 +894,16 @@ pub const EditorView = struct {
 
     // ── Internal helpers ───────────────────────────────────────────
 
+    /// Check if a byte offset falls within any cursor's selection.
+    fn isInAnySelection(self: *const EditorView, offset: u32) bool {
+        for (self.cursor.cursors.items) |c| {
+            if (c.hasSelection() and offset >= c.start() and offset < c.end()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     fn advancePastLine(self: *const EditorView, start_offset: u32) u32 {
         var offset = start_offset;
         while (offset < self.buffer.total_len) {
@@ -803,6 +1034,10 @@ pub fn renderTabBar(
 
         x += tab_w + 2; // 2px gap between tabs
     }
+}
+
+fn isWordChar(c: u8) bool {
+    return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or c == '_';
 }
 
 fn basename(path: []const u8) []const u8 {

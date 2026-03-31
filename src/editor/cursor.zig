@@ -101,6 +101,60 @@ pub const CursorState = struct {
         self.desired_col = null;
     }
 
+    // ── Multi-cursor support ─────────────────────────────────────────
+
+    pub fn addCursorAt(self: *CursorState, pos: u32) !void {
+        try self.cursors.append(self.allocator, .{ .anchor = pos, .head = pos });
+    }
+
+    pub fn addSelection(self: *CursorState, sel: Selection) !void {
+        try self.cursors.append(self.allocator, sel);
+    }
+
+    pub fn collapseToSingle(self: *CursorState) void {
+        if (self.cursors.items.len > 1) {
+            const primary_sel = self.cursors.items[0];
+            self.cursors.clearRetainingCapacity();
+            self.cursors.append(self.allocator, primary_sel) catch {};
+        }
+    }
+
+    pub fn cursorCount(self: *const CursorState) usize {
+        return self.cursors.items.len;
+    }
+
+    /// Sort cursors descending by head position (for back-to-front editing).
+    pub fn sortDescending(self: *CursorState) void {
+        const items = self.cursors.items;
+        // Simple insertion sort -- cursor counts are small
+        var i: usize = 1;
+        while (i < items.len) : (i += 1) {
+            const key = items[i];
+            var j: usize = i;
+            while (j > 0 and items[j - 1].head < key.head) {
+                items[j] = items[j - 1];
+                j -= 1;
+            }
+            items[j] = key;
+        }
+    }
+
+    /// Adjust all cursor positions after an edit.
+    /// Cursors at or after `edit_pos` are shifted by `delta`.
+    pub fn adjustPositionsAfter(self: *CursorState, edit_pos: u32, delta: i64, skip_index: usize) void {
+        for (self.cursors.items, 0..) |*sel, idx| {
+            if (idx == skip_index) continue;
+            sel.anchor = applyDelta(sel.anchor, edit_pos, delta);
+            sel.head = applyDelta(sel.head, edit_pos, delta);
+        }
+    }
+
+    fn applyDelta(pos: u32, edit_pos: u32, delta: i64) u32 {
+        if (pos < edit_pos) return pos;
+        const result = @as(i64, pos) + delta;
+        return if (result < 0) 0 else @intCast(result);
+    }
+
     pub fn utf8ByteLen(first_byte: u8) u32 {
         if (first_byte < 0x80) return 1;
         if (first_byte < 0xE0) return 2;

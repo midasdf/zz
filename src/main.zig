@@ -464,6 +464,18 @@ fn handleAction(editor: *EditorView, win: *Window, action: keymap.Action, lsp_cl
                 lsp_client.requestHover(uri, lc.line, lc.col);
             }
         },
+        .select_next_occurrence => {
+            editor.selectNextOccurrence() catch {};
+        },
+        .select_all_occurrences => {
+            editor.selectAllOccurrences() catch {};
+        },
+        .escape => {
+            if (editor.cursor.cursorCount() > 1) {
+                editor.cursor.collapseToSingle();
+                editor.markAllDirty();
+            }
+        },
         // These are handled before reaching handleAction
         .command_palette, .finder_files, .find, .goto_line => {},
         .next_tab, .prev_tab, .close_tab => {},
