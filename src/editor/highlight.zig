@@ -127,7 +127,11 @@ pub const Highlighter = struct {
         self.lang_name = lang_info.name;
 
         if (self.parser) |p| {
-            _ = ts.ts_parser_set_language(p, self.language);
+            if (!ts.ts_parser_set_language(p, self.language)) {
+                self.language = null;
+                self.lang_name = "Plain";
+                return;
+            }
         }
 
         // Free previous query before loading a new one
@@ -248,10 +252,19 @@ pub const Highlighter = struct {
             const start_lc = buffer.offsetToLineCol(start_byte);
             const new_end_lc = buffer.offsetToLineCol(new_end_byte);
 
-            // old_end point: we must compute from byte offsets.
-            // After an edit the buffer reflects the NEW state, so we estimate
-            // old_end_point from the start_point + byte delta.
+            // old_end_point: buffer reflects NEW state, so we cannot accurately
+            // compute old line:col for multi-line deletions. For single-line edits
+            // (most common: typing, backspace), the column estimate is correct.
+            // For multi-line deletions, skip ts_tree_edit and do a full re-parse.
             const old_len = old_end_byte - start_byte;
+            if (old_len > 200) {
+                // Large or potentially multi-line deletion — full re-parse is safer
+                ts.ts_tree_delete(t);
+                self.tree = null;
+                self.parse(buffer);
+                return;
+            }
+
             const old_end_col = if (old_len == 0) start_lc.col else start_lc.col + old_len;
 
             const edit = ts.TSInputEdit{
