@@ -51,7 +51,17 @@ pub fn build(b: *std.Build) void {
     const cursor_tests = b.addTest(.{ .root_module = cursor_test_mod });
     const run_cursor_tests = b.addRunArtifact(cursor_tests);
 
+    // Tests — lsp client (standalone, no C deps)
+    const lsp_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/client.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const lsp_tests = b.addTest(.{ .root_module = lsp_test_mod });
+    const run_lsp_tests = b.addRunArtifact(lsp_tests);
+
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_buffer_tests.step);
     test_step.dependOn(&run_cursor_tests.step);
+    test_step.dependOn(&run_lsp_tests.step);
 }

@@ -10,6 +10,7 @@ const keymap = @import("input/keymap.zig");
 const Overlay = @import("ui/overlay.zig").Overlay;
 const fuzzy = @import("core/fuzzy.zig");
 const file_walker = @import("core/file_walker.zig");
+const lsp = @import("lsp/client.zig");
 
 const EditorMode = enum {
     normal,
