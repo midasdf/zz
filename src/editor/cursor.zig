@@ -1,5 +1,5 @@
 const std = @import("std");
-const PieceTable = @import("buffer").PieceTable;
+const PieceTable = @import("buffer.zig").PieceTable;
 
 pub const Selection = struct {
     anchor: u32,

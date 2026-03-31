@@ -1,0 +1,682 @@
+const std = @import("std");
+const PieceTable = @import("buffer.zig").PieceTable;
+const CursorState = @import("cursor.zig").CursorState;
+const Renderer = @import("../ui/render.zig").Renderer;
+const FontFace = @import("../ui/font.zig").FontFace;
+const Color = @import("../ui/render.zig").Color;
+
+// ── Catppuccin Mocha palette ───────────────────────────────────────
+const theme = struct {
+    const base = Color.fromHex(0x1e1e2e); // Background
+    const mantle = Color.fromHex(0x181825); // Status bar / darker bg
+    const surface0 = Color.fromHex(0x313244); // Current line highlight
+    const surface1 = Color.fromHex(0x45475a); // Selection
+    const surface2 = Color.fromHex(0x585b70); // Subtle borders
+    const overlay0 = Color.fromHex(0x6c7086); // Line numbers (inactive)
+    const text = Color.fromHex(0xcdd6f4); // Main text
+    const subtext0 = Color.fromHex(0xa6adc8); // Status bar text
+    const rosewater = Color.fromHex(0xf5e0dc); // Cursor
+    const lavender = Color.fromHex(0xb4befe); // Active line number, accents
+    const green = Color.fromHex(0xa6e3a1); // Modified indicator
+    const red = Color.fromHex(0xf38ba8); // Error/close
+    const peach = Color.fromHex(0xfab387); // Warnings
+    const mauve = Color.fromHex(0xcba6f7); // Keywords (future)
+};
+
+// ── EditorView ─────────────────────────────────────────────────────
+pub const EditorView = struct {
+    buffer: PieceTable,
+    cursor: CursorState,
+    scroll_line: u32,
+    visible_rows: u32,
+    visible_cols: u32,
+    left_pad: u32 = 8,
+    dirty_rows: []bool,
+    allocator: std.mem.Allocator,
+    modified: bool = false,
+    file_path: ?[]const u8 = null,
+    cursor_visible: bool = true,
+
+    pub fn init(allocator: std.mem.Allocator, content: []const u8) !EditorView {
+        const buffer = try PieceTable.init(allocator, content);
+        const cursor = try CursorState.init(allocator);
+        const dirty = try allocator.alloc(bool, 1);
+        @memset(dirty, true);
+
+        return .{
+            .buffer = buffer,
+            .cursor = cursor,
+            .scroll_line = 0,
+            .visible_rows = 1,
+            .visible_cols = 80,
+            .dirty_rows = dirty,
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *EditorView) void {
+        self.buffer.deinit();
+        self.cursor.deinit();
+        self.allocator.free(self.dirty_rows);
+        if (self.file_path) |path| {
+            self.allocator.free(path);
+        }
+    }
+
+    // ── Viewport management ────────────────────────────────────────
+
+    pub fn updateViewport(self: *EditorView, win_width: u32, win_height: u32, font: *const FontFace) !void {
+        if (font.cell_height == 0 or font.cell_width == 0) return;
+
+        // Reserve 2 rows for status bar (status line + separator)
+        const total_rows = win_height / font.cell_height;
+        self.visible_rows = if (total_rows > 2) total_rows - 2 else 1;
+
+        // Cols = (width - gutter - left_pad) / cell_width
+        const gw = self.gutterWidth(font);
+        const code_area = if (win_width > gw) win_width - gw else 0;
+        self.visible_cols = if (code_area > 0) code_area / font.cell_width else 1;
+
+        // Reallocate dirty row flags
+        self.allocator.free(self.dirty_rows);
+        self.dirty_rows = try self.allocator.alloc(bool, self.visible_rows);
+        @memset(self.dirty_rows, true);
+    }
+
+    // ── Dirty tracking ─────────────────────────────────────────────
+
+    pub fn markAllDirty(self: *EditorView) void {
+        @memset(self.dirty_rows, true);
+    }
+
+    pub fn markRowDirty(self: *EditorView, screen_row: u32) void {
+        if (screen_row < self.dirty_rows.len) {
+            self.dirty_rows[screen_row] = true;
+        }
+    }
+
+    // ── Scroll ─────────────────────────────────────────────────────
+
+    pub fn ensureCursorVisible(self: *EditorView) void {
+        const pos = self.cursor.primary().head;
+        const lc = self.buffer.offsetToLineCol(pos);
+        const cursor_line = lc.line;
+
+        // Scroll up if cursor is above viewport
+        if (cursor_line < self.scroll_line) {
+            self.scroll_line = cursor_line;
+            self.markAllDirty();
+        }
+
+        // Scroll down if cursor is below viewport
+        if (cursor_line >= self.scroll_line + self.visible_rows) {
+            self.scroll_line = cursor_line - self.visible_rows + 1;
+            self.markAllDirty();
+        }
+    }
+
+    // ── Editing operations ─────────────────────────────────────────
+
+    pub fn insertAtCursor(self: *EditorView, text: []const u8) !void {
+        const sel = self.cursor.primary();
+
+        // If there is a selection, delete it first
+        if (sel.hasSelection()) {
+            try self.deleteSelection();
+        }
+
+        const pos = self.cursor.primary().head;
+        try self.buffer.insert(pos, text);
+        self.cursor.moveTo(pos + @as(u32, @intCast(text.len)));
+        self.modified = true;
+        self.ensureCursorVisible();
+        self.markAllDirty();
+    }
+
+    pub fn backspace(self: *EditorView) !void {
+        const sel = self.cursor.primary();
+        if (sel.hasSelection()) {
+            try self.deleteSelection();
+            return;
+        }
+
+        const pos = sel.head;
+        if (pos == 0) return;
+
+        // Find start of previous UTF-8 character
+        var prev = pos - 1;
+        while (prev > 0) {
+            const slice = self.buffer.contiguousSliceAt(prev);
+            if (slice.len == 0) break;
+            if ((slice[0] & 0xC0) != 0x80) break;
+            prev -= 1;
+        }
+
+        const del_len = pos - prev;
+        try self.buffer.delete(prev, del_len);
+        self.cursor.moveTo(prev);
+        self.modified = true;
+        self.ensureCursorVisible();
+        self.markAllDirty();
+    }
+
+    pub fn deleteForward(self: *EditorView) !void {
+        const sel = self.cursor.primary();
+        if (sel.hasSelection()) {
+            try self.deleteSelection();
+            return;
+        }
+
+        const pos = sel.head;
+        if (pos >= self.buffer.total_len) return;
+
+        const slice = self.buffer.contiguousSliceAt(pos);
+        if (slice.len == 0) return;
+
+        const byte_len = CursorState.utf8ByteLen(slice[0]);
+        try self.buffer.delete(pos, byte_len);
+        // Cursor stays at same position
+        self.modified = true;
+        self.markAllDirty();
+    }
+
+    pub fn deleteSelection(self: *EditorView) !void {
+        const sel = self.cursor.primary();
+        if (!sel.hasSelection()) return;
+
+        const start = sel.start();
+        const end = sel.end();
+        try self.buffer.delete(start, end - start);
+        self.cursor.moveTo(start);
+        self.modified = true;
+        self.ensureCursorVisible();
+        self.markAllDirty();
+    }
+
+    pub fn getSelectedText(self: *EditorView) ?[]u8 {
+        const sel = self.cursor.primary();
+        if (!sel.hasSelection()) return null;
+
+        const start = sel.start();
+        const end = sel.end();
+        const len = end - start;
+
+        const result = self.allocator.alloc(u8, len) catch return null;
+        var written: usize = 0;
+        var offset: u32 = start;
+
+        while (offset < end) {
+            const slice = self.buffer.contiguousSliceAt(offset);
+            if (slice.len == 0) break;
+            const remaining: usize = @intCast(end - offset);
+            const take = @min(slice.len, remaining);
+            @memcpy(result[written..][0..take], slice[0..take]);
+            written += take;
+            offset += @intCast(take);
+        }
+
+        return result[0..written];
+    }
+
+    // ── Rendering ──────────────────────────────────────────────────
+
+    pub fn render(self: *EditorView, renderer: *Renderer, font: *FontFace) void {
+        const cell_w = font.cell_width;
+        const cell_h = font.cell_height;
+        if (cell_w == 0 or cell_h == 0) return;
+
+        const gw = self.gutterWidth(font);
+        const code_x = gw; // code area starts right after gutter
+        const total_lines = self.buffer.lineCount();
+
+        // Cursor position info
+        const cursor_pos = self.cursor.primary().head;
+        const cursor_lc = self.buffer.offsetToLineCol(cursor_pos);
+
+        // Selection range
+        const sel = self.cursor.primary();
+        const has_sel = sel.hasSelection();
+        const sel_start = sel.start();
+        const sel_end = sel.end();
+
+        // Walk through buffer to find the byte offset for scroll_line.
+        // We compute it once via lineToOffset for the first visible line,
+        // then track byte_offset incrementally per row.
+        var byte_offset: u32 = self.buffer.lineToOffset(self.scroll_line);
+
+        var screen_row: u32 = 0;
+        while (screen_row < self.visible_rows) : (screen_row += 1) {
+            const doc_line = self.scroll_line + screen_row;
+            const row_y = screen_row * cell_h;
+
+            // Skip clean rows -- but we must advance byte_offset past this line
+            if (screen_row < self.dirty_rows.len and !self.dirty_rows[screen_row]) {
+                // Advance byte_offset past this line by scanning for newline
+                if (doc_line < total_lines) {
+                    byte_offset = self.advancePastLine(byte_offset);
+                }
+                continue;
+            }
+
+            const is_current_line = (doc_line == cursor_lc.line);
+            const line_bg = if (is_current_line) theme.surface0 else theme.base;
+
+            // Clear the entire row (gutter + code area)
+            renderer.fillRect(0, row_y, renderer.width, cell_h, line_bg);
+
+            // -- Gutter: line number --
+            if (doc_line < total_lines) {
+                self.renderGutterNumber(renderer, font, doc_line, screen_row, is_current_line);
+            }
+
+            // -- Gutter separator (1px vertical line) --
+            const sep_x = gw - self.left_pad / 2;
+            renderer.fillRect(sep_x, row_y, 1, cell_h, theme.surface2);
+
+            // -- Code area --
+            if (doc_line < total_lines) {
+                self.renderCodeLine(renderer, font, byte_offset, doc_line, screen_row, code_x, line_bg, has_sel, sel_start, sel_end);
+
+                // Advance byte_offset past this line
+                byte_offset = self.advancePastLine(byte_offset);
+            }
+
+            // -- Cursor (thin 2px beam) --
+            if (is_current_line and self.cursor_visible) {
+                const cursor_px_x = code_x + self.left_pad + cursor_lc.col * cell_w;
+                renderer.fillRect(cursor_px_x, row_y, 2, cell_h, theme.rosewater);
+            }
+
+            // Mark row as clean
+            if (screen_row < self.dirty_rows.len) {
+                self.dirty_rows[screen_row] = false;
+            }
+        }
+
+        // -- Status bar --
+        self.renderStatusBar(renderer, font, cursor_lc.line, cursor_lc.col);
+    }
+
+    // ── Render helpers (private) ───────────────────────────────────
+
+    fn renderGutterNumber(
+        self: *const EditorView,
+        renderer: *Renderer,
+        font: *FontFace,
+        doc_line: u32,
+        screen_row: u32,
+        is_current: bool,
+    ) void {
+        const cell_w = font.cell_width;
+        const cell_h = font.cell_height;
+        const row_y = screen_row * cell_h;
+
+        const fg_color = if (is_current) theme.lavender else theme.overlay0;
+        const line_bg = if (is_current) theme.surface0 else theme.base;
+
+        // Line number (1-based, right-aligned)
+        const line_num = doc_line + 1;
+        var num_buf: [12]u8 = undefined;
+        const num_str = formatU32(line_num, &num_buf);
+
+        // Calculate gutter digit columns (excluding separator padding)
+        const digit_cols = self.gutterDigits();
+
+        // Right-align: start at (digit_cols - num_str.len)
+        const padding: u32 = if (digit_cols > num_str.len) digit_cols - @as(u32, @intCast(num_str.len)) else 0;
+
+        for (num_str, 0..) |ch, i| {
+            const col_x = (padding + @as(u32, @intCast(i))) * cell_w;
+            renderer.fillRect(col_x, row_y, cell_w, cell_h, line_bg);
+            const glyph = font.getGlyph(ch) catch continue;
+            const glyph_x = @as(i32, @intCast(col_x)) + glyph.bearing_x;
+            const glyph_y = @as(i32, @intCast(row_y)) + font.ascent - glyph.bearing_y;
+            renderer.drawGlyph(glyph, glyph_x, glyph_y, fg_color);
+        }
+    }
+
+    fn renderCodeLine(
+        self: *const EditorView,
+        renderer: *Renderer,
+        font: *FontFace,
+        line_start_offset: u32,
+        doc_line: u32,
+        screen_row: u32,
+        code_x: u32,
+        line_bg: Color,
+        has_sel: bool,
+        sel_start: u32,
+        sel_end: u32,
+    ) void {
+        _ = doc_line;
+        const cell_w = font.cell_width;
+        const cell_h = font.cell_height;
+        const row_y = screen_row * cell_h;
+        const pad = self.left_pad;
+
+        var col: u32 = 0;
+        var offset = line_start_offset;
+
+        while (col < self.visible_cols) {
+            if (offset >= self.buffer.total_len) break;
+
+            const slice = self.buffer.contiguousSliceAt(offset);
+            if (slice.len == 0) break;
+
+            const byte = slice[0];
+
+            // Stop at end of line
+            if (byte == '\n') break;
+
+            // Determine background: selection overrides current-line highlight
+            var cell_bg = line_bg;
+            if (has_sel and offset >= sel_start and offset < sel_end) {
+                cell_bg = theme.surface1;
+            }
+
+            if (byte == '\t') {
+                // Render tab as spaces to next 4-column tab stop
+                const tab_stop = 4;
+                const next_tab = ((col / tab_stop) + 1) * tab_stop;
+                const spaces = @min(next_tab - col, self.visible_cols - col);
+                // Fill tab background
+                renderer.fillRect(code_x + pad + col * cell_w, row_y, spaces * cell_w, cell_h, cell_bg);
+                col += spaces;
+                offset += 1;
+            } else if (byte < 0x80) {
+                // ASCII character -- fast path
+                const px_x = code_x + pad + col * cell_w;
+                renderer.fillRect(px_x, row_y, cell_w, cell_h, cell_bg);
+                const glyph = font.getGlyph(byte) catch {
+                    col += 1;
+                    offset += 1;
+                    continue;
+                };
+                const glyph_x = @as(i32, @intCast(px_x)) + glyph.bearing_x;
+                const glyph_y = @as(i32, @intCast(row_y)) + font.ascent - glyph.bearing_y;
+                renderer.drawGlyph(glyph, glyph_x, glyph_y, theme.text);
+                col += 1;
+                offset += 1;
+            } else {
+                // Multi-byte UTF-8 codepoint
+                const cp_len = CursorState.utf8ByteLen(byte);
+                if (cp_len > @as(u32, @intCast(slice.len))) {
+                    // Incomplete codepoint at piece boundary -- skip
+                    offset += 1;
+                    col += 1;
+                    continue;
+                }
+                const codepoint = decodeUtf8(slice[0..@intCast(cp_len)]);
+                const px_x = code_x + pad + col * cell_w;
+
+                // Check if this is a wide (CJK) character -- assume 2 cells
+                const char_cells: u32 = if (isWide(codepoint)) 2 else 1;
+                const char_width = char_cells * cell_w;
+
+                // Fill background for all cells this char occupies
+                // For selection: check if any byte of this char is in selection
+                renderer.fillRect(px_x, row_y, char_width, cell_h, cell_bg);
+
+                const glyph = font.getGlyph(codepoint) catch {
+                    col += char_cells;
+                    offset += cp_len;
+                    continue;
+                };
+                const glyph_x = @as(i32, @intCast(px_x)) + glyph.bearing_x;
+                const glyph_y = @as(i32, @intCast(row_y)) + font.ascent - glyph.bearing_y;
+                renderer.drawGlyph(glyph, glyph_x, glyph_y, theme.text);
+
+                col += char_cells;
+                offset += cp_len;
+            }
+        }
+    }
+
+    fn renderStatusBar(self: *const EditorView, renderer: *Renderer, font: *FontFace, cursor_line: u32, cursor_col: u32) void {
+        const cell_w = font.cell_width;
+        const cell_h = font.cell_height;
+        const win_w = renderer.width;
+
+        // Status bar occupies the last 2 rows: 1px separator + 1 row of text
+        const status_y = self.visible_rows * cell_h;
+        const bar_y = status_y + 1;
+
+        // Separator line (1px)
+        renderer.fillRect(0, status_y, win_w, 1, theme.surface2);
+
+        // Status bar background
+        renderer.fillRect(0, bar_y, win_w, cell_h, theme.mantle);
+
+        // -- Left section: filename + modified indicator --
+        var left_col: u32 = 1; // 1-col left margin
+
+        const name = self.file_path orelse "[untitled]";
+        for (name) |ch| {
+            if (left_col >= self.visible_cols) break;
+            self.drawStatusChar(renderer, font, ch, left_col, bar_y, theme.subtext0);
+            left_col += 1;
+        }
+
+        if (self.modified) {
+            // " [+]"
+            const mod_str = " [+]";
+            for (mod_str) |ch| {
+                if (left_col >= self.visible_cols) break;
+                const color = if (ch == '+') theme.green else theme.subtext0;
+                self.drawStatusChar(renderer, font, ch, left_col, bar_y, color);
+                left_col += 1;
+            }
+        }
+
+        // -- Right section: "Ln X, Col Y   UTF-8" --
+        var right_buf: [64]u8 = undefined;
+        const right_str = formatStatusRight(cursor_line + 1, cursor_col + 1, &right_buf);
+        const right_len: u32 = @intCast(right_str.len);
+        const right_start = if (win_w / cell_w > right_len + 1) win_w / cell_w - right_len - 1 else 0;
+
+        for (right_str, 0..) |ch, i| {
+            const col = right_start + @as(u32, @intCast(i));
+            if (col >= self.visible_cols) break;
+            self.drawStatusChar(renderer, font, ch, col, bar_y, theme.subtext0);
+        }
+    }
+
+    fn drawStatusChar(
+        self: *const EditorView,
+        renderer: *Renderer,
+        font: *FontFace,
+        ch: u8,
+        col: u32,
+        bar_y: u32,
+        fg: Color,
+    ) void {
+        _ = self;
+        const cell_w = font.cell_width;
+        const px_x = col * cell_w;
+        const glyph = font.getGlyph(ch) catch return;
+        const glyph_x = @as(i32, @intCast(px_x)) + glyph.bearing_x;
+        const glyph_y = @as(i32, @intCast(bar_y)) + font.ascent - glyph.bearing_y;
+        renderer.drawGlyph(glyph, glyph_x, glyph_y, fg);
+    }
+
+    // ── Coordinate conversion ──────────────────────────────────────
+
+    pub fn pixelToPosition(self: *EditorView, px: i32, py: i32, font: *const FontFace) u32 {
+        const cell_w = font.cell_width;
+        const cell_h = font.cell_height;
+        if (cell_w == 0 or cell_h == 0) return 0;
+
+        // Determine screen row from pixel y
+        const screen_row: u32 = if (py < 0) 0 else @min(@as(u32, @intCast(@divTrunc(py, @as(i32, @intCast(cell_h))))), self.visible_rows -| 1);
+        const doc_line = self.scroll_line + screen_row;
+
+        const total_lines = self.buffer.lineCount();
+        if (doc_line >= total_lines) {
+            // Past end of document -- return end of buffer
+            return self.buffer.total_len;
+        }
+
+        const line_offset = self.buffer.lineToOffset(doc_line);
+
+        // Determine target column from pixel x
+        const gw = self.gutterWidth(font);
+        const code_x = @as(i32, @intCast(gw + self.left_pad));
+        const target_col: u32 = if (px < code_x) 0 else @intCast(@divTrunc(px - code_x, @as(i32, @intCast(cell_w))));
+
+        // Walk along the line to find the byte offset at target_col
+        var col: u32 = 0;
+        var offset = line_offset;
+
+        while (offset < self.buffer.total_len) {
+            if (col >= target_col) break;
+
+            const slice = self.buffer.contiguousSliceAt(offset);
+            if (slice.len == 0) break;
+
+            const byte = slice[0];
+            if (byte == '\n') break;
+
+            if (byte == '\t') {
+                const tab_stop: u32 = 4;
+                const next_tab = ((col / tab_stop) + 1) * tab_stop;
+                // If target is inside this tab, snap to tab start
+                if (target_col < next_tab) break;
+                col = next_tab;
+                offset += 1;
+            } else if (byte < 0x80) {
+                col += 1;
+                offset += 1;
+            } else {
+                const cp_len = CursorState.utf8ByteLen(byte);
+                const cp = if (cp_len <= @as(u32, @intCast(slice.len))) decodeUtf8(slice[0..@intCast(cp_len)]) else 0;
+                const char_cells: u32 = if (isWide(cp)) 2 else 1;
+                col += char_cells;
+                offset += cp_len;
+            }
+        }
+
+        return offset;
+    }
+
+    // ── Internal helpers ───────────────────────────────────────────
+
+    fn advancePastLine(self: *const EditorView, start_offset: u32) u32 {
+        var offset = start_offset;
+        while (offset < self.buffer.total_len) {
+            const slice = self.buffer.contiguousSliceAt(offset);
+            if (slice.len == 0) break;
+
+            // Scan this contiguous slice for newline
+            for (slice, 0..) |byte, i| {
+                if (byte == '\n') {
+                    return offset + @as(u32, @intCast(i)) + 1;
+                }
+            }
+            // No newline in this slice -- advance past it
+            offset += @intCast(slice.len);
+        }
+        return offset;
+    }
+
+    fn gutterWidth(self: *const EditorView, font: *const FontFace) u32 {
+        const digits = self.gutterDigits();
+        return (digits + 1) * font.cell_width + self.left_pad;
+    }
+
+    fn gutterDigits(self: *const EditorView) u32 {
+        const total = self.buffer.lineCount();
+        var digits: u32 = 1;
+        var n: u32 = total;
+        while (n >= 10) {
+            n /= 10;
+            digits += 1;
+        }
+        return @max(3, digits);
+    }
+};
+
+// ── Free functions ─────────────────────────────────────────────────
+
+fn decodeUtf8(bytes: []const u8) u32 {
+    if (bytes.len == 0) return 0xFFFD;
+    const b0 = bytes[0];
+    if (b0 < 0x80) return b0;
+    if (b0 < 0xE0) {
+        if (bytes.len < 2) return 0xFFFD;
+        return (@as(u32, b0 & 0x1F) << 6) | @as(u32, bytes[1] & 0x3F);
+    }
+    if (b0 < 0xF0) {
+        if (bytes.len < 3) return 0xFFFD;
+        return (@as(u32, b0 & 0x0F) << 12) |
+            (@as(u32, bytes[1] & 0x3F) << 6) |
+            @as(u32, bytes[2] & 0x3F);
+    }
+    if (bytes.len < 4) return 0xFFFD;
+    return (@as(u32, b0 & 0x07) << 18) |
+        (@as(u32, bytes[1] & 0x3F) << 12) |
+        (@as(u32, bytes[2] & 0x3F) << 6) |
+        @as(u32, bytes[3] & 0x3F);
+}
+
+/// Simple wide-character check (CJK Unified Ideographs + common fullwidth ranges).
+fn isWide(cp: u32) bool {
+    // CJK Unified Ideographs
+    if (cp >= 0x4E00 and cp <= 0x9FFF) return true;
+    // CJK Unified Ideographs Extension A
+    if (cp >= 0x3400 and cp <= 0x4DBF) return true;
+    // CJK Compatibility Ideographs
+    if (cp >= 0xF900 and cp <= 0xFAFF) return true;
+    // Hangul Syllables
+    if (cp >= 0xAC00 and cp <= 0xD7AF) return true;
+    // Fullwidth Forms
+    if (cp >= 0xFF01 and cp <= 0xFF60) return true;
+    // Katakana/Hiragana
+    if (cp >= 0x3000 and cp <= 0x30FF) return true;
+    if (cp >= 0x31F0 and cp <= 0x31FF) return true;
+    // CJK Symbols and Punctuation
+    if (cp >= 0x3000 and cp <= 0x303F) return true;
+    return false;
+}
+
+fn formatU32(val: u32, buf: *[12]u8) []const u8 {
+    var n = val;
+    var i: usize = buf.len;
+    if (n == 0) {
+        i -= 1;
+        buf[i] = '0';
+        return buf[i..];
+    }
+    while (n > 0) {
+        i -= 1;
+        buf[i] = @intCast('0' + (n % 10));
+        n /= 10;
+    }
+    return buf[i..];
+}
+
+fn formatStatusRight(line: u32, col: u32, buf: *[64]u8) []const u8 {
+    // Build "Ln X, Col Y   UTF-8" right-to-left style
+    const prefix = "Ln ";
+    const mid = ", Col ";
+    const suffix = "   UTF-8";
+
+    var line_buf: [12]u8 = undefined;
+    const line_str = formatU32(line, &line_buf);
+
+    var col_buf: [12]u8 = undefined;
+    const col_str = formatU32(col, &col_buf);
+
+    var pos: usize = 0;
+    @memcpy(buf[pos..][0..prefix.len], prefix);
+    pos += prefix.len;
+    @memcpy(buf[pos..][0..line_str.len], line_str);
+    pos += line_str.len;
+    @memcpy(buf[pos..][0..mid.len], mid);
+    pos += mid.len;
+    @memcpy(buf[pos..][0..col_str.len], col_str);
+    pos += col_str.len;
+    @memcpy(buf[pos..][0..suffix.len], suffix);
+    pos += suffix.len;
+
+    return buf[0..pos];
+}
