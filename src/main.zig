@@ -299,8 +299,9 @@ pub fn main() !void {
                             },
 
                             .paste => |pe| {
-                                editor.insertAtCursor(pe.data) catch {};
-                                notifyLspChange(editor, &lsp_client, allocator);
+                                const active = pane_mgr.active_leaf;
+                                active.insertAtCursor(pe.data) catch {};
+                                notifyLspChange(active, &lsp_client, allocator);
                                 pe.deinit();
                                 resetCursorBlink(editor);
                             },
@@ -386,20 +387,17 @@ fn handleSplit(
     win_w: u32,
     win_h: u32,
 ) void {
-    // Open the same file in a new EditorView for the split
+    // Clone current buffer content for split (preserves unsaved edits)
     const current = pane_mgr.active_leaf;
     const fp = current.file_path;
 
-    // Read file content (or use empty)
-    var content: []const u8 = "";
-    var owned: ?[]u8 = null;
-    if (fp) |path| {
-        owned = std.fs.cwd().readFileAlloc(allocator, path, 100 * 1024 * 1024) catch null;
-        if (owned) |c| content = c;
-    }
-    defer if (owned) |c| allocator.free(c);
+    const content = current.buffer.collectContent(allocator) catch return;
 
-    const new_view = tab_mgr.addTab(content, fp) catch return;
+    const new_view = tab_mgr.addTab(content, fp) catch {
+        allocator.free(content);
+        return;
+    };
+    new_view.buffer.owned_original = content;
     new_view.initHighlighting();
 
     // Copy cursor position and scroll from original
