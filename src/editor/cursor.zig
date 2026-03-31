@@ -54,8 +54,12 @@ pub const CursorState = struct {
         const cur = &self.cursors.items[0];
         if (cur.head < buf.total_len) {
             const slice = buf.contiguousSliceAt(cur.head);
-            const byte_len = utf8ByteLen(slice[0]);
-            cur.head = @min(cur.head + byte_len, buf.total_len);
+            if (slice.len == 0) {
+                cur.head = buf.total_len;
+            } else {
+                const byte_len = utf8ByteLen(slice[0]);
+                cur.head = @min(cur.head + byte_len, buf.total_len);
+            }
         }
         if (!extend) cur.anchor = cur.head;
         self.desired_col = null;
@@ -67,7 +71,8 @@ pub const CursorState = struct {
             var pos = cur.head - 1;
             while (pos > 0) {
                 const slice = buf.contiguousSliceAt(pos);
-                if (slice.len > 0 and (slice[0] & 0xC0) != 0x80) break;
+                if (slice.len == 0) break;
+                if ((slice[0] & 0xC0) != 0x80) break;
                 pos -= 1;
             }
             cur.head = pos;

@@ -109,6 +109,7 @@ pub const PieceTable = struct {
         });
 
         var entry = self.undo_stack.pop().?;
+        errdefer entry.deinit(self.allocator);
         self.pieces.clearRetainingCapacity();
         try self.pieces.appendSlice(self.allocator, entry.pieces_snapshot);
         self.total_len = entry.total_len;
@@ -127,6 +128,7 @@ pub const PieceTable = struct {
         });
 
         var entry = self.redo_stack.pop().?;
+        errdefer entry.deinit(self.allocator);
         self.pieces.clearRetainingCapacity();
         try self.pieces.appendSlice(self.allocator, entry.pieces_snapshot);
         self.total_len = entry.total_len;
