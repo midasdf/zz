@@ -8,6 +8,8 @@ const EditorView = @import("editor/view.zig").EditorView;
 const view_mod = @import("editor/view.zig");
 const PieceTable = @import("editor/buffer.zig").PieceTable;
 const TabManager = @import("editor/tabs.zig").TabManager;
+const panes_mod = @import("editor/panes.zig");
+const PaneManager = panes_mod.PaneManager;
 const keymap = @import("input/keymap.zig");
 const Overlay = @import("ui/overlay.zig").Overlay;
 const fuzzy = @import("core/fuzzy.zig");
@@ -78,6 +80,10 @@ pub fn main() !void {
     initial_view.y_offset = tab_bar_h;
     initial_view.initHighlighting();
     try initial_view.updateViewport(win.width, win.height, &font);
+
+    // Pane manager
+    var pane_mgr = try PaneManager.init(allocator, initial_view);
+    defer pane_mgr.deinit();
 
     // LSP client
     var lsp_client = lsp.LspClient.init(allocator);
@@ -153,7 +159,7 @@ pub fn main() !void {
     {
         const editor = tab_mgr.activeView();
         editor.lsp_diagnostics = lsp_client.diagnostics.items;
-        renderFrame(&tab_mgr, &win, &font, &overlay);
+        renderFrame(&tab_mgr, &pane_mgr, &win, &font, &overlay);
     }
 
     while (running) {
@@ -164,13 +170,13 @@ pub fn main() !void {
             switch (ev.data.u32) {
                 0 => { // xcb events
                     while (win.pollEvent()) |event| {
-                        const editor = tab_mgr.activeView();
+                        const editor = pane_mgr.active_leaf;
                         switch (event) {
                             .close => running = false,
 
                             .key_press => |ke| {
                                 if (mode != .normal) {
-                                    handleOverlayKey(&mode, &overlay, &tab_mgr, ke, allocator, &file_list, &filtered_display, &lsp_client, &font);
+                                    handleOverlayKey(&mode, &overlay, &tab_mgr, &pane_mgr, ke, allocator, &file_list, &filtered_display, &lsp_client, &font);
                                 } else {
                                     const mod = keymap.modFromWindow(ke.modifiers);
                                     if (keymap.mapKey(ke.keysym, mod)) |action| {
@@ -181,15 +187,38 @@ pub fn main() !void {
                                             .goto_line => openGotoLine(&mode, &overlay),
                                             .next_tab => {
                                                 tab_mgr.nextTab();
+                                                syncPaneToActiveTab(&pane_mgr, &tab_mgr);
                                                 tab_mgr.activeView().markAllDirty();
                                             },
                                             .prev_tab => {
                                                 tab_mgr.prevTab();
+                                                syncPaneToActiveTab(&pane_mgr, &tab_mgr);
                                                 tab_mgr.activeView().markAllDirty();
                                             },
                                             .close_tab => {
                                                 tab_mgr.closeActive();
+                                                syncPaneToActiveTab(&pane_mgr, &tab_mgr);
                                                 tab_mgr.activeView().markAllDirty();
+                                            },
+                                            .split_vertical => {
+                                                handleSplit(&pane_mgr, &tab_mgr, .vertical, allocator, &font, tab_bar_h, win.width, win.height);
+                                            },
+                                            .split_horizontal => {
+                                                handleSplit(&pane_mgr, &tab_mgr, .horizontal, allocator, &font, tab_bar_h, win.width, win.height);
+                                            },
+                                            .focus_next_pane => {
+                                                pane_mgr.focusNext();
+                                                // Sync tab_mgr.active to match the focused pane
+                                                syncTabToActivePane(&pane_mgr, &tab_mgr);
+                                                markAllPanesDirty(&pane_mgr);
+                                            },
+                                            .close_pane => {
+                                                if (pane_mgr.isSplit()) {
+                                                    pane_mgr.unsplitActive();
+                                                    relayoutPanes(&pane_mgr, tab_bar_h, win.width, win.height, &font);
+                                                    syncTabToActivePane(&pane_mgr, &tab_mgr);
+                                                    markAllPanesDirty(&pane_mgr);
+                                                }
                                             },
                                             else => handleAction(editor, &win, action, &lsp_client, allocator),
                                         }
@@ -212,13 +241,10 @@ pub fn main() !void {
 
                             .resize => |r| {
                                 win.resize(r.width, r.height) catch {};
-                                // Update viewport for all tabs
-                                for (tab_mgr.tabs.items) |tab| {
-                                    tab.updateViewport(r.width, r.height, &font) catch {};
-                                }
+                                relayoutPanes(&pane_mgr, tab_bar_h, r.width, r.height, &font);
                             },
 
-                            .expose => editor.markAllDirty(),
+                            .expose => markAllPanesDirty(&pane_mgr),
 
                             .scroll => |s| {
                                 handleScroll(editor, s.delta);
@@ -229,12 +255,24 @@ pub fn main() !void {
                                     // Check if click is in tab bar area
                                     if (me.y >= 0 and me.y < @as(i32, @intCast(tab_bar_h))) {
                                         handleTabBarClick(&tab_mgr, me.x, &font);
+                                        syncPaneToActiveTab(&pane_mgr, &tab_mgr);
                                     } else {
-                                        const pos = editor.pixelToPosition(me.x, me.y, &font);
-                                        editor.cursor.moveTo(pos);
+                                        // Determine which pane was clicked
+                                        if (pane_mgr.isSplit()) {
+                                            if (pane_mgr.leafAtPixel(me.x, me.y)) |clicked_view| {
+                                                if (clicked_view != pane_mgr.active_leaf) {
+                                                    pane_mgr.active_leaf = clicked_view;
+                                                    syncTabToActivePane(&pane_mgr, &tab_mgr);
+                                                    markAllPanesDirty(&pane_mgr);
+                                                }
+                                            }
+                                        }
+                                        const active = pane_mgr.active_leaf;
+                                        const pos = active.pixelToPosition(me.x, me.y, &font);
+                                        active.cursor.moveTo(pos);
                                         mouse_dragging = true;
-                                        editor.markAllDirty();
-                                        resetCursorBlink(editor);
+                                        active.markAllDirty();
+                                        resetCursorBlink(active);
                                     }
                                 } else if (me.button == .middle) {
                                     win.requestPrimary();
@@ -244,7 +282,8 @@ pub fn main() !void {
                             .mouse_release => |me| {
                                 if (me.button == .left) {
                                     mouse_dragging = false;
-                                    if (editor.getSelectedText()) |text| {
+                                    const active = pane_mgr.active_leaf;
+                                    if (active.getSelectedText()) |text| {
                                         win.setClipboard(text);
                                     }
                                 }
@@ -252,9 +291,10 @@ pub fn main() !void {
 
                             .mouse_motion => |me| {
                                 if (mouse_dragging) {
-                                    const pos = editor.pixelToPosition(me.x, me.y, &font);
-                                    editor.cursor.selectTo(pos);
-                                    editor.markAllDirty();
+                                    const active = pane_mgr.active_leaf;
+                                    const pos = active.pixelToPosition(me.x, me.y, &font);
+                                    active.cursor.selectTo(pos);
+                                    active.markAllDirty();
                                 }
                             },
 
@@ -279,7 +319,7 @@ pub fn main() !void {
                 },
 
                 1 => { // cursor blink timer
-                    const editor = tab_mgr.activeView();
+                    const editor = pane_mgr.active_leaf;
                     var buf: [8]u8 = undefined;
                     _ = std.posix.read(timer_fd, &buf) catch {};
                     editor.cursor_visible = !editor.cursor_visible;
@@ -290,7 +330,7 @@ pub fn main() !void {
                 },
 
                 2 => { // LSP
-                    const editor = tab_mgr.activeView();
+                    const editor = pane_mgr.active_leaf;
                     lsp_client.processMessages();
                     editor.lsp_diagnostics = lsp_client.diagnostics.items;
                     editor.markAllDirty();
@@ -306,6 +346,7 @@ pub fn main() !void {
                                     true;
                                 if (should_open) {
                                     openFileInTab(&tab_mgr, allocator, p, &lsp_client, &font);
+                                    syncPaneToActiveTab(&pane_mgr, &tab_mgr);
                                 }
                                 // Move cursor in the (now-active) tab
                                 const active = tab_mgr.activeView();
@@ -326,10 +367,87 @@ pub fn main() !void {
         }
 
         {
-            const editor = tab_mgr.activeView();
+            const editor = pane_mgr.active_leaf;
             editor.lsp_diagnostics = lsp_client.diagnostics.items;
-            renderFrame(&tab_mgr, &win, &font, &overlay);
+            renderFrame(&tab_mgr, &pane_mgr, &win, &font, &overlay);
         }
+    }
+}
+
+// ── Pane management helpers ──────────────────────────────────────
+
+fn handleSplit(
+    pane_mgr: *PaneManager,
+    tab_mgr: *TabManager,
+    direction: panes_mod.Direction,
+    allocator: std.mem.Allocator,
+    font: *const FontFace,
+    tab_bar_h: u32,
+    win_w: u32,
+    win_h: u32,
+) void {
+    // Open the same file in a new EditorView for the split
+    const current = pane_mgr.active_leaf;
+    const fp = current.file_path;
+
+    // Read file content (or use empty)
+    var content: []const u8 = "";
+    var owned: ?[]u8 = null;
+    if (fp) |path| {
+        owned = std.fs.cwd().readFileAlloc(allocator, path, 100 * 1024 * 1024) catch null;
+        if (owned) |c| content = c;
+    }
+    defer if (owned) |c| allocator.free(c);
+
+    const new_view = tab_mgr.addTab(content, fp) catch return;
+    new_view.initHighlighting();
+
+    // Copy cursor position and scroll from original
+    new_view.scroll_line = current.scroll_line;
+    new_view.cursor.cursors.items[0] = current.cursor.primary();
+
+    pane_mgr.splitActive(direction, new_view) catch return;
+
+    relayoutPanes(pane_mgr, tab_bar_h, win_w, win_h, font);
+    markAllPanesDirty(pane_mgr);
+}
+
+fn relayoutPanes(pane_mgr: *PaneManager, tab_bar_h: u32, win_w: u32, win_h: u32, font: *const FontFace) void {
+    const content_h = if (win_h > tab_bar_h) win_h - tab_bar_h else 0;
+    pane_mgr.applyLayout(0, tab_bar_h, win_w, content_h);
+
+    // Update viewports for all leaves
+    var leaves: [16]*EditorView = undefined;
+    const count = pane_mgr.allLeaves(&leaves);
+    for (leaves[0..count]) |view| {
+        view.updateViewport(view.paneWidth(win_w), win_h, font) catch {};
+    }
+}
+
+fn syncPaneToActiveTab(pane_mgr: *PaneManager, tab_mgr: *TabManager) void {
+    // If not split, just update the active_leaf pointer
+    if (!pane_mgr.isSplit()) {
+        pane_mgr.active_leaf = tab_mgr.activeView();
+        pane_mgr.root.* = .{ .leaf = tab_mgr.activeView() };
+    }
+}
+
+fn syncTabToActivePane(pane_mgr: *PaneManager, tab_mgr: *TabManager) void {
+    const active = pane_mgr.active_leaf;
+    // Find which tab index matches this view
+    for (tab_mgr.tabs.items, 0..) |tab, i| {
+        if (tab == active) {
+            tab_mgr.active = i;
+            return;
+        }
+    }
+}
+
+fn markAllPanesDirty(pane_mgr: *PaneManager) void {
+    var leaves: [16]*EditorView = undefined;
+    const count = pane_mgr.allLeaves(&leaves);
+    for (leaves[0..count]) |view| {
+        view.markAllDirty();
     }
 }
 
@@ -479,6 +597,7 @@ fn handleAction(editor: *EditorView, win: *Window, action: keymap.Action, lsp_cl
         // These are handled before reaching handleAction
         .command_palette, .finder_files, .find, .goto_line => {},
         .next_tab, .prev_tab, .close_tab => {},
+        .split_vertical, .split_horizontal, .focus_next_pane, .close_pane => {},
     }
 }
 
@@ -564,7 +683,7 @@ fn saveFile(editor: *EditorView) void {
     editor.markAllDirty(); // Redraw status bar
 }
 
-fn renderFrame(tab_mgr: *TabManager, win: *Window, font: *FontFace, overlay: *Overlay) void {
+fn renderFrame(tab_mgr: *TabManager, pane_mgr: *PaneManager, win: *Window, font: *FontFace, overlay: *Overlay) void {
     var renderer = Renderer{
         .buffer = win.getBuffer(),
         .stride = win.stride,
@@ -573,9 +692,36 @@ fn renderFrame(tab_mgr: *TabManager, win: *Window, font: *FontFace, overlay: *Ov
     };
     // Render tab bar first
     view_mod.renderTabBar(tab_mgr, &renderer, font);
-    // Render active editor content below
-    const editor = tab_mgr.activeView();
-    editor.render(&renderer, font);
+
+    if (pane_mgr.isSplit()) {
+        // Render all pane leaves
+        var leaves: [16]*EditorView = undefined;
+        const count = pane_mgr.allLeaves(&leaves);
+        for (leaves[0..count]) |view| {
+            view.render(&renderer, font);
+        }
+        // Render separators between panes
+        const tab_bar_h = view_mod.tabBarHeight(font);
+        pane_mgr.renderSeparators(
+            win.getBuffer(),
+            win.stride,
+            win.width,
+            win.height,
+            0,
+            tab_bar_h,
+            win.width,
+            if (win.height > tab_bar_h) win.height - tab_bar_h else 0,
+        );
+        // Active pane indicator (lavender left border, 2px)
+        const active = pane_mgr.active_leaf;
+        const indicator_color = render_mod.Color.fromHex(0xb4befe);
+        renderer.fillRect(active.x_offset, active.y_offset, 2, active.visible_rows * font.cell_height, indicator_color);
+    } else {
+        // Single pane -- render as before
+        const editor = tab_mgr.activeView();
+        editor.render(&renderer, font);
+    }
+
     overlay.render(&renderer, font);
     win.markAllDirty();
     win.present();
@@ -642,6 +788,7 @@ fn handleOverlayKey(
     mode: *EditorMode,
     overlay: *Overlay,
     tab_mgr: *TabManager,
+    pane_mgr: *PaneManager,
     ke: window_mod.KeyEvent,
     allocator: std.mem.Allocator,
     file_list: *?[][]const u8,
@@ -650,7 +797,7 @@ fn handleOverlayKey(
     font: *const FontFace,
 ) void {
     const keysym = ke.keysym;
-    const editor = tab_mgr.activeView();
+    const editor = pane_mgr.active_leaf;
 
     if (keysym == window_mod.XK_Escape) {
         overlay.close();
@@ -664,6 +811,7 @@ fn handleOverlayKey(
             .file_finder => {
                 if (overlay.selectedItem()) |path| {
                     openFileInTab(tab_mgr, allocator, path, lsp_client, font);
+                    syncPaneToActiveTab(pane_mgr, tab_mgr);
                 }
             },
             .goto_line => {
@@ -688,7 +836,7 @@ fn handleOverlayKey(
         }
         overlay.close();
         mode.* = .normal;
-        tab_mgr.activeView().markAllDirty();
+        pane_mgr.active_leaf.markAllDirty();
         return;
     }
 

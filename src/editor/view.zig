@@ -57,6 +57,8 @@ pub const EditorView = struct {
     cursor_visible: bool = true,
     lsp_diagnostics: []const Diagnostic = &.{},
     y_offset: u32 = 0, // Pixel offset for tab bar
+    x_offset: u32 = 0, // Pixel offset for split panes
+    render_width: u32 = 0, // Pane width (0 = use renderer.width)
 
     pub fn init(allocator: std.mem.Allocator, content: []const u8) !EditorView {
         var buffer = try PieceTable.init(allocator, content);
@@ -99,6 +101,11 @@ pub const EditorView = struct {
 
     // ── Viewport management ────────────────────────────────────────
 
+    /// Effective pane width: render_width if set, otherwise full window width.
+    pub fn paneWidth(self: *const EditorView, fallback: u32) u32 {
+        return if (self.render_width > 0) self.render_width else fallback;
+    }
+
     pub fn updateViewport(self: *EditorView, win_width: u32, win_height: u32, font: *const FontFace) !void {
         if (font.cell_height == 0 or font.cell_width == 0) return;
 
@@ -107,9 +114,12 @@ pub const EditorView = struct {
         const total_rows = avail_h / font.cell_height;
         self.visible_rows = if (total_rows > 2) total_rows - 2 else 1;
 
+        // Use pane width if set, otherwise full window width
+        const effective_w = self.paneWidth(win_width);
+
         // Cols = (width - gutter - left_pad) / cell_width
         const gw = self.gutterWidth(font);
-        const code_area = if (win_width > gw) win_width - gw else 0;
+        const code_area = if (effective_w > gw) effective_w - gw else 0;
         self.visible_cols = if (code_area > 0) code_area / font.cell_width else 1;
 
         // Reallocate dirty row flags (alloc new before freeing old)
@@ -479,8 +489,10 @@ pub const EditorView = struct {
         const cell_h = font.cell_height;
         if (cell_w == 0 or cell_h == 0) return;
 
+        const xo = self.x_offset; // pane x origin
+        const pw = self.paneWidth(renderer.width); // pane pixel width
         const gw = self.gutterWidth(font);
-        const code_x = gw; // code area starts right after gutter
+        const code_x = xo + gw; // code area starts right after gutter
         const total_lines = self.buffer.lineCount();
 
         // Primary cursor position info (for current-line highlight + status bar)
@@ -538,8 +550,8 @@ pub const EditorView = struct {
             const is_current_line = (doc_line == cursor_lc.line);
             const line_bg = if (is_current_line) theme.surface0 else theme.base;
 
-            // Clear the entire row (gutter + code area)
-            renderer.fillRect(0, row_y, renderer.width, cell_h, line_bg);
+            // Clear the entire row (gutter + code area) within this pane
+            renderer.fillRect(xo, row_y, pw, cell_h, line_bg);
 
             // -- Gutter: line number --
             if (doc_line < total_lines) {
@@ -547,7 +559,7 @@ pub const EditorView = struct {
             }
 
             // -- Gutter separator (1px vertical line) --
-            const sep_x = gw - self.left_pad / 2;
+            const sep_x = xo + gw - self.left_pad / 2;
             renderer.fillRect(sep_x, row_y, 1, cell_h, theme.surface2);
 
             // -- Code area --
@@ -555,7 +567,7 @@ pub const EditorView = struct {
                 self.renderCodeLine(renderer, font, byte_offset, doc_line, screen_row, code_x, line_bg, has_sel);
 
                 // -- Diagnostic underlines --
-                self.renderDiagnostics(renderer, font, doc_line, code_x, screen_row * cell_h);
+                self.renderDiagnostics(renderer, font, doc_line, code_x, self.y_offset + screen_row * cell_h);
 
                 // Advance byte_offset past this line
                 byte_offset = self.advancePastLine(byte_offset);
@@ -595,7 +607,8 @@ pub const EditorView = struct {
     ) void {
         const cell_w = font.cell_width;
         const cell_h = font.cell_height;
-        const row_y = screen_row * cell_h;
+        const row_y = self.y_offset + screen_row * cell_h;
+        const xo = self.x_offset;
 
         const fg_color = if (is_current) theme.lavender else theme.overlay0;
         const line_bg = if (is_current) theme.surface0 else theme.base;
@@ -609,10 +622,10 @@ pub const EditorView = struct {
         const digit_cols = self.gutterDigits();
 
         // Right-align: start at (digit_cols - num_str.len)
-        const padding: u32 = if (digit_cols > num_str.len) digit_cols - @as(u32, @intCast(num_str.len)) else 0;
+        const padding_cols: u32 = if (digit_cols > num_str.len) digit_cols - @as(u32, @intCast(num_str.len)) else 0;
 
         for (num_str, 0..) |ch, i| {
-            const col_x = (padding + @as(u32, @intCast(i))) * cell_w;
+            const col_x = xo + (padding_cols + @as(u32, @intCast(i))) * cell_w;
             renderer.fillRect(col_x, row_y, cell_w, cell_h, line_bg);
             const glyph = font.getGlyph(ch) catch continue;
             const glyph_x = @as(i32, @intCast(col_x)) + glyph.bearing_x;
@@ -635,7 +648,7 @@ pub const EditorView = struct {
         _ = doc_line;
         const cell_w = font.cell_width;
         const cell_h = font.cell_height;
-        const row_y = screen_row * cell_h;
+        const row_y = self.y_offset + screen_row * cell_h;
         const pad = self.left_pad;
 
         var col: u32 = 0;
@@ -765,17 +778,18 @@ pub const EditorView = struct {
     fn renderStatusBar(self: *const EditorView, renderer: *Renderer, font: *FontFace, cursor_line: u32, cursor_col: u32) void {
         const cell_w = font.cell_width;
         const cell_h = font.cell_height;
-        const win_w = renderer.width;
+        const xo = self.x_offset;
+        const pw = self.paneWidth(renderer.width);
 
         // Status bar occupies the last 2 rows: 1px separator + 1 row of text
         const status_y = self.y_offset + self.visible_rows * cell_h;
         const bar_y = status_y + 1;
 
         // Separator line (1px)
-        renderer.fillRect(0, status_y, win_w, 1, theme.surface2);
+        renderer.fillRect(xo, status_y, pw, 1, theme.surface2);
 
         // Status bar background
-        renderer.fillRect(0, bar_y, win_w, cell_h, theme.mantle);
+        renderer.fillRect(xo, bar_y, pw, cell_h, theme.mantle);
 
         // -- Left section: filename + modified indicator --
         var left_col: u32 = 1; // 1-col left margin
@@ -803,7 +817,7 @@ pub const EditorView = struct {
         var right_buf: [96]u8 = undefined;
         const right_str = formatStatusRight(cursor_line + 1, cursor_col + 1, lang_name, &right_buf);
         const right_len: u32 = @intCast(right_str.len);
-        const right_start = if (win_w / cell_w > right_len + 1) win_w / cell_w - right_len - 1 else 0;
+        const right_start = if (pw / cell_w > right_len + 1) pw / cell_w - right_len - 1 else 0;
 
         for (right_str, 0..) |ch, i| {
             const col = right_start + @as(u32, @intCast(i));
@@ -821,9 +835,8 @@ pub const EditorView = struct {
         bar_y: u32,
         fg: Color,
     ) void {
-        _ = self;
         const cell_w = font.cell_width;
-        const px_x = col * cell_w;
+        const px_x = self.x_offset + col * cell_w;
         const glyph = font.getGlyph(ch) catch return;
         const glyph_x = @as(i32, @intCast(px_x)) + glyph.bearing_x;
         const glyph_y = @as(i32, @intCast(bar_y)) + font.ascent - glyph.bearing_y;
@@ -852,9 +865,9 @@ pub const EditorView = struct {
 
         const line_offset = self.buffer.lineToOffset(doc_line);
 
-        // Determine target column from pixel x
+        // Determine target column from pixel x (adjusted for pane x_offset)
         const gw = self.gutterWidth(font);
-        const code_x = @as(i32, @intCast(gw + self.left_pad));
+        const code_x = @as(i32, @intCast(self.x_offset + gw + self.left_pad));
         const target_col: u32 = if (px < code_x) 0 else @intCast(@divTrunc(px - code_x, @as(i32, @intCast(cell_w))));
 
         // Walk along the line to find the byte offset at target_col

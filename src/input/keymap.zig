@@ -58,6 +58,11 @@ pub const Action = enum {
     // LSP
     goto_definition,
     hover,
+    // Panes
+    split_vertical,
+    split_horizontal,
+    focus_next_pane,
+    close_pane,
 };
 
 pub fn modFromWindow(mods: Window.Modifiers) Modifier {
@@ -74,6 +79,8 @@ pub fn mapKey(keysym: u32, mods: Modifier) ?Action {
     if (mods == .ctrl) {
         // Ctrl+Tab -> next tab
         if (keysym == Window.XK_Tab) return .next_tab;
+        // Ctrl+\ -> split vertical
+        if (keysym == Window.XK_backslash) return .split_vertical;
         const k = if (keysym >= 'A' and keysym <= 'Z') keysym + 32 else keysym;
         return switch (k) {
             'a' => .select_all,
@@ -94,12 +101,19 @@ pub fn mapKey(keysym: u32, mods: Modifier) ?Action {
     if (mods == .ctrl_shift) {
         // Ctrl+Shift+Tab -> prev tab (XK_ISO_Left_Tab = 0xFE20)
         if (keysym == Window.XK_Tab or keysym == Window.XK_ISO_Left_Tab) return .prev_tab;
+        // Ctrl+Shift+\ (often produces | keysym) -> split horizontal
+        if (keysym == Window.XK_bar or keysym == Window.XK_backslash) return .split_horizontal;
         return switch (keysym) {
             'z', 'Z' => .redo,
             'p', 'P' => .command_palette,
             'l', 'L' => .select_all_occurrences,
+            'w', 'W' => .close_pane,
             else => null,
         };
+    }
+    if (mods == .alt) {
+        // Alt+\ -> focus next pane
+        if (keysym == Window.XK_backslash) return .focus_next_pane;
     }
 
     // Shift+arrow = selection

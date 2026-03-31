@@ -104,6 +104,8 @@ pub const XK_F9 = 0xFFC6;
 pub const XK_F10 = 0xFFC7;
 pub const XK_F11 = 0xFFC8;
 pub const XK_F12 = 0xFFC9;
+pub const XK_backslash = 0x005c;
+pub const XK_bar = 0x007c;
 
 fn isSpecialKeysym(keysym: u32) bool {
     return switch (keysym) {
