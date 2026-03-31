@@ -6,6 +6,7 @@ const SyntaxKind = @import("highlight.zig").SyntaxKind;
 const Renderer = @import("../ui/render.zig").Renderer;
 const FontFace = @import("../ui/font.zig").FontFace;
 const Color = @import("../ui/render.zig").Color;
+const Diagnostic = @import("../lsp/client.zig").Diagnostic;
 
 // ── Catppuccin Mocha palette ───────────────────────────────────────
 const theme = struct {
@@ -53,6 +54,7 @@ pub const EditorView = struct {
     modified: bool = false,
     file_path: ?[]const u8 = null,
     cursor_visible: bool = true,
+    lsp_diagnostics: []const Diagnostic = &.{},
 
     pub fn init(allocator: std.mem.Allocator, content: []const u8) !EditorView {
         var buffer = try PieceTable.init(allocator, content);
@@ -332,6 +334,9 @@ pub const EditorView = struct {
             if (doc_line < total_lines) {
                 self.renderCodeLine(renderer, font, byte_offset, doc_line, screen_row, code_x, line_bg, has_sel, sel_start, sel_end);
 
+                // -- Diagnostic underlines --
+                self.renderDiagnostics(renderer, font, doc_line, code_x, screen_row * cell_h);
+
                 // Advance byte_offset past this line
                 byte_offset = self.advancePastLine(byte_offset);
             }
@@ -489,6 +494,48 @@ pub const EditorView = struct {
                 col += char_cells;
                 offset += cp_len;
             }
+        }
+    }
+
+    fn renderDiagnostics(
+        self: *const EditorView,
+        renderer: *Renderer,
+        font: *FontFace,
+        doc_line: u32,
+        code_x: u32,
+        row_y: u32,
+    ) void {
+        const cell_w = font.cell_width;
+        const cell_h = font.cell_height;
+        if (cell_w == 0 or cell_h == 0) return;
+
+        const underline_y = row_y + cell_h - 2; // 2px from bottom of cell
+        const pad = self.left_pad;
+
+        for (self.lsp_diagnostics) |diag| {
+            if (diag.line != doc_line) continue;
+
+            const color: Color = switch (diag.severity) {
+                .err => theme.red,
+                .warning => theme.peach,
+                .info => theme.lavender,
+                .hint => theme.overlay0,
+            };
+
+            // Convert byte columns to visual columns for underline placement
+            const vis_start = self.visualColAtOffset(doc_line, diag.col_start);
+            const vis_end_col = if (diag.col_end > diag.col_start)
+                self.visualColAtOffset(doc_line, diag.col_end)
+            else
+                vis_start + 1;
+
+            const start_px = code_x + pad + vis_start * cell_w;
+            const width_px = (vis_end_col - vis_start) * cell_w;
+
+            if (width_px == 0) continue;
+
+            // Draw a 2px underline
+            renderer.fillRect(start_px, underline_y, width_px, 2, color);
         }
     }
 

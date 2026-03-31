@@ -792,7 +792,7 @@ pub const LspClient = struct {
         var params_buf: [4096]u8 = undefined;
         const params = std.fmt.bufPrint(&params_buf,
             \\{{"processId":{d},"rootUri":"{s}","capabilities":{{"textDocument":{{"completion":{{"completionItem":{{"snippetSupport":false}}}},"hover":{{"contentFormat":["plaintext"]}},"publishDiagnostics":{{"relatedInformation":false}},"synchronization":{{"didSave":true}},"definition":{{}}}}}}}}
-        , .{ std.posix.getpid(), root_uri }) catch return;
+        , .{ std.os.linux.getpid(), root_uri }) catch return;
 
         // Use id=1 (next_id starts at 1, will be incremented)
         self.sendRequest("initialize", params);

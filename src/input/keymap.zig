@@ -47,6 +47,9 @@ pub const Action = enum {
     finder_files,
     find,
     goto_line,
+    // LSP
+    goto_definition,
+    hover,
 };
 
 pub fn modFromWindow(mods: Window.Modifiers) Modifier {
@@ -111,6 +114,7 @@ pub fn mapKey(keysym: u32, mods: Modifier) ?Action {
         Window.XK_Delete => .delete,
         Window.XK_Return => .enter,
         Window.XK_Tab => .tab,
+        Window.XK_F12 => .goto_definition,
         else => null,
     };
 }

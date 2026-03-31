@@ -73,6 +73,29 @@ pub fn main() !void {
     editor.initHighlighting();
     try editor.updateViewport(win.width, win.height, &font);
 
+    // LSP client
+    var lsp_client = lsp.LspClient.init(allocator);
+    defer lsp_client.deinit();
+
+    // Start LSP server if applicable
+    if (editor.file_path) |path| {
+        if (lsp.serverCommand(path)) |cmd| {
+            var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const cwd_path = std.fs.cwd().realpath(".", &cwd_buf) catch null;
+            if (cwd_path) |root| {
+                lsp_client.start(cmd, root) catch {};
+                // Send didOpen
+                var uri_buf: [4096]u8 = undefined;
+                const uri = lsp.formatUri(path, &uri_buf);
+                const lsp_content = editor.buffer.collectContent(allocator) catch null;
+                if (lsp_content) |c| {
+                    defer allocator.free(c);
+                    lsp_client.didOpen(uri, lsp.languageId(path) orelse "text", c);
+                }
+            }
+        }
+    }
+
     // Overlay state
     var mode: EditorMode = .normal;
     var overlay = Overlay{};
@@ -80,6 +103,12 @@ pub fn main() !void {
     defer if (file_list) |fl| file_walker.freeFiles(allocator, fl);
     var filtered_display: std.ArrayList([]const u8) = .{};
     defer filtered_display.deinit(allocator);
+
+    // Completion popup state
+    var completion_active = false;
+    var completion_selected: usize = 0;
+    _ = &completion_active;
+    _ = &completion_selected;
 
     // Epoll setup
     const epoll_fd = try std.posix.epoll_create1(std.os.linux.EPOLL.CLOEXEC);
@@ -102,10 +131,20 @@ pub fn main() !void {
     };
     try std.posix.epoll_ctl(epoll_fd, std.os.linux.EPOLL.CTL_ADD, timer_fd, &timer_ev);
 
+    // Register LSP stdout fd with epoll
+    if (lsp_client.getStdoutFd()) |lsp_fd| {
+        var lsp_ev = std.os.linux.epoll_event{
+            .events = std.os.linux.EPOLL.IN,
+            .data = .{ .u32 = 2 },
+        };
+        std.posix.epoll_ctl(epoll_fd, std.os.linux.EPOLL.CTL_ADD, lsp_fd, &lsp_ev) catch {};
+    }
+
     var running = true;
     var mouse_dragging = false;
 
-    // Initial render
+    // Initial render — pass diagnostics to editor
+    editor.lsp_diagnostics = lsp_client.diagnostics.items;
     renderFrame(&editor, &win, &font, &overlay);
 
     while (running) {
@@ -130,7 +169,7 @@ pub fn main() !void {
                                             .finder_files => openFileFinder(&mode, &overlay, allocator, &file_list, &filtered_display),
                                             .find => openSearch(&mode, &overlay),
                                             .goto_line => openGotoLine(&mode, &overlay),
-                                            else => handleAction(&editor, &win, action),
+                                            else => handleAction(&editor, &win, action, &lsp_client, allocator),
                                         }
                                         resetCursorBlink(&editor);
                                     }
@@ -144,6 +183,7 @@ pub fn main() !void {
                                     editor.markAllDirty();
                                 } else {
                                     editor.insertAtCursor(te.slice()) catch {};
+                                    notifyLspChange(&editor, &lsp_client, allocator);
                                     resetCursorBlink(&editor);
                                 }
                             },
@@ -191,6 +231,7 @@ pub fn main() !void {
 
                             .paste => |pe| {
                                 editor.insertAtCursor(pe.data) catch {};
+                                notifyLspChange(&editor, &lsp_client, allocator);
                                 pe.deinit();
                                 resetCursorBlink(&editor);
                             },
@@ -219,15 +260,40 @@ pub fn main() !void {
                     }
                 },
 
+                2 => { // LSP
+                    lsp_client.processMessages();
+                    editor.lsp_diagnostics = lsp_client.diagnostics.items;
+                    editor.markAllDirty();
+
+                    // Handle goto definition response
+                    if (lsp_client.has_goto) {
+                        lsp_client.has_goto = false;
+                        if (lsp_client.goto_location) |loc| {
+                            if (lsp.uriToPath(loc.uri)) |p| {
+                                if (editor.file_path) |current| {
+                                    if (!std.mem.eql(u8, p, current)) {
+                                        openFile(&editor, allocator, p);
+                                    }
+                                }
+                                const target_off = editor.buffer.lineToOffset(loc.line) + loc.col;
+                                editor.cursor.moveTo(@min(target_off, editor.buffer.total_len));
+                                editor.ensureCursorVisible();
+                                editor.markAllDirty();
+                            }
+                        }
+                    }
+                },
+
                 else => {},
             }
         }
 
+        editor.lsp_diagnostics = lsp_client.diagnostics.items;
         renderFrame(&editor, &win, &font, &overlay);
     }
 }
 
-fn handleAction(editor: *EditorView, win: *Window, action: keymap.Action) void {
+fn handleAction(editor: *EditorView, win: *Window, action: keymap.Action, lsp_client: *lsp.LspClient, allocator: std.mem.Allocator) void {
     switch (action) {
         .move_left => {
             editor.cursor.moveLeft(&editor.buffer, false);
@@ -293,17 +359,21 @@ fn handleAction(editor: *EditorView, win: *Window, action: keymap.Action) void {
         },
         .backspace => {
             editor.backspace() catch {};
+            notifyLspChange(editor, lsp_client, allocator);
             editor.markAllDirty();
         },
         .delete => {
             editor.deleteForward() catch {};
+            notifyLspChange(editor, lsp_client, allocator);
             editor.markAllDirty();
         },
         .enter => {
             editor.insertAtCursor("\n") catch {};
+            notifyLspChange(editor, lsp_client, allocator);
         },
         .tab => {
             editor.insertAtCursor("    ") catch {};
+            notifyLspChange(editor, lsp_client, allocator);
         },
         .copy => {
             if (editor.getSelectedText()) |text| {
@@ -314,6 +384,7 @@ fn handleAction(editor: *EditorView, win: *Window, action: keymap.Action) void {
             if (editor.getSelectedText()) |text| {
                 win.setClipboard(text);
                 editor.deleteSelection() catch {};
+                notifyLspChange(editor, lsp_client, allocator);
             }
         },
         .paste => {
@@ -327,11 +398,44 @@ fn handleAction(editor: *EditorView, win: *Window, action: keymap.Action) void {
             _ = editor.buffer.redo() catch {};
             editor.markAllDirty();
         },
-        .save => saveFile(editor),
+        .save => {
+            saveFile(editor);
+            // Notify LSP of save
+            if (editor.file_path) |path| {
+                var uri_buf: [4096]u8 = undefined;
+                const uri = lsp.formatUri(path, &uri_buf);
+                lsp_client.didSave(uri);
+            }
+        },
         .quit => std.process.exit(0),
+        .goto_definition => {
+            if (editor.file_path) |path| {
+                var uri_buf: [4096]u8 = undefined;
+                const uri = lsp.formatUri(path, &uri_buf);
+                const lc = editor.buffer.offsetToLineCol(editor.cursor.primary().head);
+                lsp_client.requestDefinition(uri, lc.line, lc.col);
+            }
+        },
+        .hover => {
+            if (editor.file_path) |path| {
+                var uri_buf: [4096]u8 = undefined;
+                const uri = lsp.formatUri(path, &uri_buf);
+                const lc = editor.buffer.offsetToLineCol(editor.cursor.primary().head);
+                lsp_client.requestHover(uri, lc.line, lc.col);
+            }
+        },
         // These are handled before reaching handleAction
         .command_palette, .finder_files, .find, .goto_line => {},
     }
+}
+
+fn notifyLspChange(editor: *EditorView, lsp_client: *lsp.LspClient, allocator: std.mem.Allocator) void {
+    const path = editor.file_path orelse return;
+    var uri_buf: [4096]u8 = undefined;
+    const uri = lsp.formatUri(path, &uri_buf);
+    const content = editor.buffer.collectContent(allocator) catch return;
+    defer allocator.free(content);
+    lsp_client.didChange(uri, 0, content);
 }
 
 fn moveVertical(editor: *EditorView, delta: i32, extend: bool) void {
