@@ -65,6 +65,8 @@ pub const Action = enum {
     close_pane,
     // Sidebar
     toggle_sidebar,
+    // Terminal
+    toggle_terminal,
 };
 
 pub fn modFromWindow(mods: Window.Modifiers) Modifier {
@@ -83,6 +85,8 @@ pub fn mapKey(keysym: u32, mods: Modifier) ?Action {
         if (keysym == Window.XK_Tab) return .next_tab;
         // Ctrl+\ -> split vertical
         if (keysym == Window.XK_backslash) return .split_vertical;
+        // Ctrl+` -> toggle terminal
+        if (keysym == Window.XK_grave) return .toggle_terminal;
         const k = if (keysym >= 'A' and keysym <= 'Z') keysym + 32 else keysym;
         return switch (k) {
             'a' => .select_all,

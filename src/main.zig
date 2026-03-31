@@ -17,6 +17,7 @@ const file_walker = @import("core/file_walker.zig");
 const lsp = @import("lsp/client.zig");
 const FileTree = @import("ui/file_tree.zig").FileTree;
 const GitInfo = @import("core/git.zig").GitInfo;
+const Terminal = @import("ui/terminal.zig").Terminal;
 
 const EditorMode = enum {
     normal,
@@ -100,6 +101,10 @@ pub fn main() !void {
     var file_tree = FileTree.init(allocator, ".");
     defer file_tree.deinit();
 
+    // Terminal panel
+    var terminal = try Terminal.init(allocator);
+    defer terminal.deinit();
+
     // LSP client
     var lsp_client = lsp.LspClient.init(allocator);
     defer lsp_client.deinit();
@@ -169,12 +174,13 @@ pub fn main() !void {
 
     var running = true;
     var mouse_dragging = false;
+    var pty_registered: ?std.posix.fd_t = null; // Track registered PTY fd
 
     // Initial render
     {
         const editor = tab_mgr.activeView();
         editor.lsp_diagnostics = lsp_client.diagnostics.items;
-        renderFrame(&tab_mgr, &pane_mgr, &win, &font, &overlay, &file_tree);
+        renderFrame(&tab_mgr, &pane_mgr, &win, &font, &overlay, &file_tree, &terminal);
     }
 
     while (running) {
@@ -194,7 +200,30 @@ pub fn main() !void {
                                     handleOverlayKey(&mode, &overlay, &tab_mgr, &pane_mgr, ke, allocator, &file_list, &filtered_display, &lsp_client, &font, &git_info);
                                 } else {
                                     const mod = keymap.modFromWindow(ke.modifiers);
+                                    // Check for toggle_terminal first (Ctrl+`)
                                     if (keymap.mapKey(ke.keysym, mod)) |action| {
+                                        if (action == .toggle_terminal) {
+                                            terminal.toggle();
+                                            // Register/deregister PTY fd with epoll
+                                            if (terminal.visible) {
+                                                if (terminal.getPtyFd()) |pty_fd| {
+                                                    if (pty_registered == null) {
+                                                        var pty_ev = std.os.linux.epoll_event{
+                                                            .events = std.os.linux.EPOLL.IN,
+                                                            .data = .{ .u32 = 3 },
+                                                        };
+                                                        std.posix.epoll_ctl(epoll_fd, std.os.linux.EPOLL.CTL_ADD, pty_fd, &pty_ev) catch {};
+                                                        pty_registered = pty_fd;
+                                                    }
+                                                }
+                                            }
+                                            relayoutWithTerminal(&pane_mgr, &file_tree, &terminal, tab_bar_h, win.width, win.height, &font);
+                                            markAllPanesDirty(&pane_mgr);
+                                        } else if (terminal.focused) {
+                                            // Terminal is focused: only Ctrl+` escapes, rest goes to PTY
+                                            // (handled above as toggle_terminal)
+                                            _ = terminal.handleKey(ke.keysym, ke.modifiers.ctrl, ke.modifiers.shift);
+                                        } else {
                                         switch (action) {
                                             .command_palette => openCommandPalette(&mode, &overlay, &filtered_display, allocator),
                                             .finder_files => openFileFinder(&mode, &overlay, allocator, &file_list, &filtered_display),
@@ -219,10 +248,10 @@ pub fn main() !void {
                                                 tab_mgr.activeView().markAllDirty();
                                             },
                                             .split_vertical => {
-                                                handleSplit(&pane_mgr, &tab_mgr, .vertical, allocator, &font, &file_tree, tab_bar_h, win.width, win.height);
+                                                handleSplit(&pane_mgr, &tab_mgr, .vertical, allocator, &font, &file_tree, tab_bar_h, win.width, win.height, &terminal);
                                             },
                                             .split_horizontal => {
-                                                handleSplit(&pane_mgr, &tab_mgr, .horizontal, allocator, &font, &file_tree, tab_bar_h, win.width, win.height);
+                                                handleSplit(&pane_mgr, &tab_mgr, .horizontal, allocator, &font, &file_tree, tab_bar_h, win.width, win.height, &terminal);
                                             },
                                             .focus_next_pane => {
                                                 pane_mgr.focusNext();
@@ -233,7 +262,7 @@ pub fn main() !void {
                                             .close_pane => {
                                                 if (pane_mgr.isSplit()) {
                                                     pane_mgr.unsplitActive();
-                                                    relayoutPanes(&pane_mgr, &file_tree, tab_bar_h, win.width, win.height, &font);
+                                                    relayoutWithTerminal(&pane_mgr, &file_tree, &terminal, tab_bar_h, win.width, win.height, &font);
                                                     syncTabToActivePane(&pane_mgr, &tab_mgr);
                                                     markAllPanesDirty(&pane_mgr);
                                                 }
@@ -241,12 +270,17 @@ pub fn main() !void {
                                             .toggle_sidebar => {
                                                 file_tree.toggle();
                                                 file_tree.active_path = if (pane_mgr.active_leaf.file_path) |p| p else null;
-                                                relayoutPanes(&pane_mgr, &file_tree, tab_bar_h, win.width, win.height, &font);
+                                                relayoutWithTerminal(&pane_mgr, &file_tree, &terminal, tab_bar_h, win.width, win.height, &font);
                                                 markAllPanesDirty(&pane_mgr);
                                             },
+                                            .toggle_terminal => unreachable,
                                             else => handleAction(editor, &win, action, &lsp_client, allocator),
                                         }
+                                        }
                                         resetCursorBlink(editor);
+                                    } else if (terminal.focused) {
+                                        // Unmapped key while terminal focused -- send raw
+                                        _ = terminal.handleKey(ke.keysym, ke.modifiers.ctrl, ke.modifiers.shift);
                                     }
                                 }
                             },
@@ -256,6 +290,8 @@ pub fn main() !void {
                                     overlay.appendText(te.slice());
                                     updateOverlayResults(&mode, &overlay, allocator, file_list, &filtered_display);
                                     editor.markAllDirty();
+                                } else if (terminal.focused) {
+                                    terminal.handleTextInput(te.slice());
                                 } else {
                                     editor.insertAtCursor(te.slice()) catch {};
                                     notifyLspChange(editor, &lsp_client, allocator);
@@ -265,17 +301,24 @@ pub fn main() !void {
 
                             .resize => |r| {
                                 win.resize(r.width, r.height) catch {};
-                                relayoutPanes(&pane_mgr, &file_tree, tab_bar_h, r.width, r.height, &font);
+                                relayoutWithTerminal(&pane_mgr, &file_tree, &terminal, tab_bar_h, r.width, r.height, &font);
                             },
 
                             .expose => markAllPanesDirty(&pane_mgr),
 
                             .scroll => |s| {
-                                handleScroll(editor, s.delta);
+                                if (!terminal.focused) {
+                                    handleScroll(editor, s.delta);
+                                }
                             },
 
                             .mouse_press => |me| {
                                 if (me.button == .left) {
+                                    // Check if click is in terminal area
+                                    if (terminal.containsPoint(me.x, me.y)) {
+                                        terminal.focused = true;
+                                    } else {
+                                        terminal.focused = false;
                                     const sw = file_tree.sidebarWidth(&font);
                                     if (file_tree.visible and me.x >= 0 and me.x < @as(i32, @intCast(sw))) {
                                         // Click in file tree sidebar
@@ -283,7 +326,7 @@ pub fn main() !void {
                                             openFileInTab(&tab_mgr, allocator, path, &lsp_client, &font, &git_info);
                                             syncPaneToActiveTab(&pane_mgr, &tab_mgr);
                                             file_tree.active_path = if (pane_mgr.active_leaf.file_path) |p| p else null;
-                                            relayoutPanes(&pane_mgr, &file_tree, tab_bar_h, win.width, win.height, &font);
+                                            relayoutWithTerminal(&pane_mgr, &file_tree, &terminal, tab_bar_h, win.width, win.height, &font);
                                         }
                                         markAllPanesDirty(&pane_mgr);
                                     } else if (me.y >= 0 and me.y < @as(i32, @intCast(tab_bar_h))) {
@@ -310,6 +353,7 @@ pub fn main() !void {
                                         active.markAllDirty();
                                         resetCursorBlink(active);
                                     }
+                                    }
                                 } else if (me.button == .middle) {
                                     win.requestPrimary();
                                 }
@@ -335,11 +379,15 @@ pub fn main() !void {
                             },
 
                             .paste => |pe| {
-                                const active = pane_mgr.active_leaf;
-                                active.insertAtCursor(pe.data) catch {};
-                                notifyLspChange(active, &lsp_client, allocator);
+                                if (terminal.focused) {
+                                    terminal.handleTextInput(pe.data);
+                                } else {
+                                    const active = pane_mgr.active_leaf;
+                                    active.insertAtCursor(pe.data) catch {};
+                                    notifyLspChange(active, &lsp_client, allocator);
+                                    resetCursorBlink(editor);
+                                }
                                 pe.deinit();
-                                resetCursorBlink(editor);
                             },
 
                             .focus_in => {
@@ -399,6 +447,10 @@ pub fn main() !void {
                     }
                 },
 
+                3 => { // PTY output
+                    terminal.processOutput();
+                },
+
                 else => {},
             }
         }
@@ -406,7 +458,7 @@ pub fn main() !void {
         {
             const editor = pane_mgr.active_leaf;
             editor.lsp_diagnostics = lsp_client.diagnostics.items;
-            renderFrame(&tab_mgr, &pane_mgr, &win, &font, &overlay, &file_tree);
+            renderFrame(&tab_mgr, &pane_mgr, &win, &font, &overlay, &file_tree, &terminal);
         }
     }
 }
@@ -418,11 +470,12 @@ fn handleSplit(
     tab_mgr: *TabManager,
     direction: panes_mod.Direction,
     allocator: std.mem.Allocator,
-    font: *const FontFace,
+    font: *FontFace,
     file_tree: *FileTree,
     tab_bar_h: u32,
     win_w: u32,
     win_h: u32,
+    term: *Terminal,
 ) void {
     // Clone current buffer content for split (preserves unsaved edits)
     const current = pane_mgr.active_leaf;
@@ -443,7 +496,7 @@ fn handleSplit(
 
     pane_mgr.splitActive(direction, new_view) catch return;
 
-    relayoutPanes(pane_mgr, file_tree, tab_bar_h, win_w, win_h, font);
+    relayoutWithTerminal(pane_mgr, file_tree, term, tab_bar_h, win_w, win_h, font);
     markAllPanesDirty(pane_mgr);
 }
 
@@ -458,6 +511,27 @@ fn relayoutPanes(pane_mgr: *PaneManager, file_tree: *FileTree, tab_bar_h: u32, w
     const count = pane_mgr.allLeaves(&leaves);
     for (leaves[0..count]) |view| {
         view.updateViewport(view.paneWidth(editor_w), win_h, font) catch {};
+    }
+}
+
+fn relayoutWithTerminal(pane_mgr: *PaneManager, file_tree: *FileTree, term: *Terminal, tab_bar_h: u32, win_w: u32, win_h: u32, font: *const FontFace) void {
+    const term_h = term.pixelHeight(font);
+    const available_h = if (win_h > tab_bar_h + term_h) win_h - tab_bar_h - term_h else 0;
+    const sw = file_tree.sidebarWidth(font);
+    const editor_w = if (win_w > sw) win_w - sw else 0;
+    pane_mgr.applyLayout(sw, tab_bar_h, editor_w, available_h);
+
+    // Update viewports for all leaves
+    var leaves: [16]*EditorView = undefined;
+    const count = pane_mgr.allLeaves(&leaves);
+    for (leaves[0..count]) |view| {
+        view.updateViewport(view.paneWidth(editor_w), tab_bar_h + available_h, font) catch {};
+    }
+
+    // Update terminal layout
+    if (term.visible) {
+        const term_y = tab_bar_h + available_h;
+        term.updateLayout(0, term_y, win_w, term_h, font);
     }
 }
 
@@ -635,7 +709,7 @@ fn handleAction(editor: *EditorView, win: *Window, action: keymap.Action, lsp_cl
         .command_palette, .finder_files, .find, .goto_line => {},
         .next_tab, .prev_tab, .close_tab => {},
         .split_vertical, .split_horizontal, .focus_next_pane, .close_pane => {},
-        .toggle_sidebar => {},
+        .toggle_sidebar, .toggle_terminal => {},
     }
 }
 
@@ -733,7 +807,7 @@ fn recomputeGitDiff(git_info: *GitInfo, view: *EditorView) void {
     }
 }
 
-fn renderFrame(tab_mgr: *TabManager, pane_mgr: *PaneManager, win: *Window, font: *FontFace, overlay: *Overlay, file_tree: *FileTree) void {
+fn renderFrame(tab_mgr: *TabManager, pane_mgr: *PaneManager, win: *Window, font: *FontFace, overlay: *Overlay, file_tree: *FileTree, term: *Terminal) void {
     var renderer = Renderer{
         .buffer = win.getBuffer(),
         .stride = win.stride,
@@ -777,6 +851,9 @@ fn renderFrame(tab_mgr: *TabManager, pane_mgr: *PaneManager, win: *Window, font:
     // Render file tree sidebar
     const tab_bar_h_render = view_mod.tabBarHeight(font);
     file_tree.render(&renderer, font, tab_bar_h_render);
+
+    // Render terminal panel
+    term.render(&renderer, font);
 
     overlay.render(&renderer, font);
     win.markAllDirty();

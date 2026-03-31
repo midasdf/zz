@@ -106,6 +106,7 @@ pub const XK_F11 = 0xFFC8;
 pub const XK_F12 = 0xFFC9;
 pub const XK_backslash = 0x005c;
 pub const XK_bar = 0x007c;
+pub const XK_grave = 0x0060;
 
 fn isSpecialKeysym(keysym: u32) bool {
     return switch (keysym) {
