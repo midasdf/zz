@@ -23,6 +23,12 @@ pub fn build(b: *std.Build) void {
     exe.linkSystemLibrary("xkbcommon-x11");
     exe.linkSystemLibrary("xcb-imdkit");
     exe.linkSystemLibrary("freetype2");
+    exe.linkSystemLibrary("tree-sitter");
+    exe.linkSystemLibrary("tree-sitter-c");
+    exe.linkSystemLibrary("tree-sitter-python");
+    exe.linkSystemLibrary("tree-sitter-rust");
+    exe.linkSystemLibrary("tree-sitter-javascript");
+    exe.linkSystemLibrary("tree-sitter-bash");
     exe.linkLibC();
 
     b.installArtifact(exe);
