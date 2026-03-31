@@ -216,6 +216,11 @@ pub fn main() !void {
                                                         pty_registered = pty_fd;
                                                     }
                                                 }
+                                            } else {
+                                                if (pty_registered) |reg_fd| {
+                                                    std.posix.epoll_ctl(epoll_fd, std.os.linux.EPOLL.CTL_DEL, reg_fd, null) catch {};
+                                                    pty_registered = null;
+                                                }
                                             }
                                             relayoutWithTerminal(&pane_mgr, &file_tree, &terminal, tab_bar_h, win.width, win.height, &font);
                                             markAllPanesDirty(&pane_mgr);
@@ -380,7 +385,7 @@ pub fn main() !void {
 
                             .paste => |pe| {
                                 if (terminal.focused) {
-                                    terminal.handleTextInput(pe.data);
+                                    terminal.handlePaste(pe.data);
                                 } else {
                                     const active = pane_mgr.active_leaf;
                                     active.insertAtCursor(pe.data) catch {};

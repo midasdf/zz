@@ -110,6 +110,7 @@ pub const GitInfo = struct {
             self.diff_lines.append(self.allocator, .{ .line = del_line, .kind = .deleted }) catch {};
         } else if (old_count == 0) {
             // Pure addition
+            if (new_start == 0) return; // guard: 0 is invalid in unified diff (1-based)
             var i: u32 = 0;
             while (i < new_count) : (i += 1) {
                 const line_0based = new_start - 1 + i; // convert 1-based to 0-based
@@ -117,6 +118,7 @@ pub const GitInfo = struct {
             }
         } else {
             // Modification (both old and new have content)
+            if (new_start == 0) return; // guard: 0 is invalid in unified diff (1-based)
             var i: u32 = 0;
             while (i < new_count) : (i += 1) {
                 const line_0based = new_start - 1 + i;

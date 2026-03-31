@@ -392,6 +392,8 @@ const TermGrid = struct {
     decckm: bool = false,
     // Alternate screen
     alt_cells: ?[]Cell = null,
+    alt_fg_rgb: ?[]?[3]u8 = null,
+    alt_bg_rgb: ?[]?[3]u8 = null,
     is_alt_screen: bool = false,
     // Insert mode
     insert_mode: bool = false,
@@ -420,6 +422,8 @@ const TermGrid = struct {
         self.allocator.free(self.fg_rgb);
         self.allocator.free(self.bg_rgb);
         if (self.alt_cells) |ac| self.allocator.free(ac);
+        if (self.alt_fg_rgb) |af| self.allocator.free(af);
+        if (self.alt_bg_rgb) |ab| self.allocator.free(ab);
     }
 
     fn idx(self: *const TermGrid, x: u32, y: u32) usize {
@@ -687,10 +691,26 @@ const TermGrid = struct {
             self.alt_cells = self.allocator.alloc(Cell, total) catch return;
             @memset(self.alt_cells.?, Cell{});
         }
-        // Swap
+        if (self.alt_fg_rgb == null) {
+            self.alt_fg_rgb = self.allocator.alloc(?[3]u8, total) catch return;
+            @memset(self.alt_fg_rgb.?, null);
+        }
+        if (self.alt_bg_rgb == null) {
+            self.alt_bg_rgb = self.allocator.alloc(?[3]u8, total) catch return;
+            @memset(self.alt_bg_rgb.?, null);
+        }
+        // Swap cells
         const tmp = self.cells;
         self.cells = self.alt_cells.?;
         self.alt_cells = tmp;
+        // Swap fg_rgb
+        const tmp_fg = self.fg_rgb;
+        self.fg_rgb = self.alt_fg_rgb.?;
+        self.alt_fg_rgb = tmp_fg;
+        // Swap bg_rgb
+        const tmp_bg = self.bg_rgb;
+        self.bg_rgb = self.alt_bg_rgb.?;
+        self.alt_bg_rgb = tmp_bg;
         self.is_alt_screen = alt;
         if (alt) {
             // Clear alt screen on entry
@@ -703,8 +723,10 @@ const TermGrid = struct {
     fn resize(self: *TermGrid, new_cols: u32, new_rows: u32) !void {
         const new_total = @as(usize, new_cols) * @as(usize, new_rows);
         const new_cells = try self.allocator.alloc(Cell, new_total);
+        errdefer self.allocator.free(new_cells);
         @memset(new_cells, Cell{});
         const new_fg = try self.allocator.alloc(?[3]u8, new_total);
+        errdefer self.allocator.free(new_fg);
         @memset(new_fg, null);
         const new_bg = try self.allocator.alloc(?[3]u8, new_total);
         @memset(new_bg, null);
@@ -734,6 +756,16 @@ const TermGrid = struct {
             self.allocator.free(ac);
             self.alt_cells = try self.allocator.alloc(Cell, new_total);
             @memset(self.alt_cells.?, Cell{});
+        }
+        if (self.alt_fg_rgb) |af| {
+            self.allocator.free(af);
+            self.alt_fg_rgb = try self.allocator.alloc(?[3]u8, new_total);
+            @memset(self.alt_fg_rgb.?, null);
+        }
+        if (self.alt_bg_rgb) |ab| {
+            self.allocator.free(ab);
+            self.alt_bg_rgb = try self.allocator.alloc(?[3]u8, new_total);
+            @memset(self.alt_bg_rgb.?, null);
         }
     }
 };
@@ -1347,6 +1379,10 @@ pub const Terminal = struct {
     }
 
     pub fn handleTextInput(self: *Terminal, text: []const u8) void {
+        self.sendBytes(text);
+    }
+
+    pub fn handlePaste(self: *Terminal, text: []const u8) void {
         if (self.grid.bracketed_paste) {
             self.sendBytes("\x1b[200~");
             self.sendBytes(text);
@@ -1432,6 +1468,7 @@ pub const Terminal = struct {
 
                 const cx = self.x + @as(u32, @intCast(col)) * font.cell_width;
                 const cy = base_y + @as(u32, @intCast(row)) * font.cell_height;
+                const safe_ascent: u32 = if (font.ascent >= 0) @intCast(font.ascent) else 0;
 
                 // Background (only non-default)
                 if (cell.bg != 0 or cell.reverse or self.grid.bg_rgb[ci] != null) {
@@ -1448,13 +1485,13 @@ pub const Terminal = struct {
 
                 // Underline
                 if (cell.underline) {
-                    const uy = cy + @as(u32, @intCast(font.ascent)) + 1;
+                    const uy = cy + safe_ascent + 1;
                     renderer.fillRect(cx, uy, font.cell_width, 1, fg_c);
                 }
 
                 // Strikethrough
                 if (cell.strikethrough) {
-                    const sy = cy + @as(u32, @intCast(font.ascent)) / 2;
+                    const sy = cy + safe_ascent / 2;
                     renderer.fillRect(cx, sy, font.cell_width, 1, fg_c);
                 }
             }
