@@ -1,0 +1,6 @@
+.{
+    .name = .zz,
+    .version = "0.1.0",
+    .fingerprint = 0x24d91ba1b02fba38,
+    .paths = .{""},
+}
