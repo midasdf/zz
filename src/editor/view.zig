@@ -38,8 +38,10 @@ pub const EditorView = struct {
     cursor_visible: bool = true,
 
     pub fn init(allocator: std.mem.Allocator, content: []const u8) !EditorView {
-        const buffer = try PieceTable.init(allocator, content);
-        const cursor = try CursorState.init(allocator);
+        var buffer = try PieceTable.init(allocator, content);
+        errdefer buffer.deinit();
+        var cursor = try CursorState.init(allocator);
+        errdefer cursor.deinit();
         const dirty = try allocator.alloc(bool, 1);
         @memset(dirty, true);
 
@@ -77,10 +79,11 @@ pub const EditorView = struct {
         const code_area = if (win_width > gw) win_width - gw else 0;
         self.visible_cols = if (code_area > 0) code_area / font.cell_width else 1;
 
-        // Reallocate dirty row flags
+        // Reallocate dirty row flags (alloc new before freeing old)
+        const new_dirty = try self.allocator.alloc(bool, self.visible_rows);
+        @memset(new_dirty, true);
         self.allocator.free(self.dirty_rows);
-        self.dirty_rows = try self.allocator.alloc(bool, self.visible_rows);
-        @memset(self.dirty_rows, true);
+        self.dirty_rows = new_dirty;
     }
 
     // ── Dirty tracking ─────────────────────────────────────────────
@@ -283,7 +286,8 @@ pub const EditorView = struct {
 
             // -- Cursor (thin 2px beam) --
             if (is_current_line and self.cursor_visible) {
-                const cursor_px_x = code_x + self.left_pad + cursor_lc.col * cell_w;
+                const vcol = self.visualColAtOffset(cursor_lc.line, cursor_lc.col);
+                const cursor_px_x = code_x + self.left_pad + vcol * cell_w;
                 renderer.fillRect(cursor_px_x, row_y, 2, cell_h, theme.rosewater);
             }
 
@@ -576,6 +580,28 @@ pub const EditorView = struct {
             offset += @intCast(slice.len);
         }
         return offset;
+    }
+
+    /// Compute the visual column for a cursor position, accounting for tabs.
+    fn visualColAtOffset(self: *const EditorView, line: u32, col: u32) u32 {
+        const line_start = self.buffer.lineToOffset(line);
+        const target = line_start + col;
+        var vcol: u32 = 0;
+        var off = line_start;
+        while (off < target and off < self.buffer.total_len) {
+            const slice = self.buffer.contiguousSliceAt(off);
+            if (slice.len == 0 or slice[0] == '\n') break;
+            if (slice[0] == '\t') {
+                vcol += 4 - (vcol % 4);
+                off += 1;
+            } else {
+                const byte_len = CursorState.utf8ByteLen(slice[0]);
+                const cp = decodeUtf8(slice[0..@min(byte_len, @as(u32, @intCast(slice.len)))]);
+                vcol += if (isWide(cp)) 2 else 1;
+                off += byte_len;
+            }
+        }
+        return vcol;
     }
 
     fn gutterWidth(self: *const EditorView, font: *const FontFace) u32 {

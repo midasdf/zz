@@ -149,7 +149,7 @@ pub fn main() !void {
                             },
 
                             .focus_out => {
-                                editor.cursor_visible = true;
+                                editor.cursor_visible = false;
                                 editor.markAllDirty();
                             },
                         }

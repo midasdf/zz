@@ -54,9 +54,10 @@ pub fn modFromWindow(mods: Window.Modifiers) Modifier {
 
 /// Map an XKB keysym + modifiers to an editor action.
 pub fn mapKey(keysym: u32, mods: Modifier) ?Action {
-    // Ctrl+key bindings
+    // Ctrl+key bindings (normalize to lowercase for CapsLock compat)
     if (mods == .ctrl) {
-        return switch (keysym) {
+        const k = if (keysym >= 'A' and keysym <= 'Z') keysym + 32 else keysym;
+        return switch (k) {
             'a' => .select_all,
             'c' => .copy,
             'x' => .cut,
