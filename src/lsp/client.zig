@@ -122,7 +122,7 @@ pub const LspClient = struct {
         if (child.stdout) |stdout| {
             const fd = stdout.handle;
             const flags = posix.fcntl(fd, posix.F.GETFL, 0) catch 0;
-            _ = posix.fcntl(fd, posix.F.SETFL, flags | (1 << @bitOffsetOf(posix.O, "NONBLOCK"))) catch {};
+            _ = posix.fcntl(fd, posix.F.SETFL, flags | 0x800) catch {}; // O_NONBLOCK
         }
 
         // Send initialize request
@@ -398,7 +398,7 @@ pub const LspClient = struct {
     fn handleResponse(self: *LspClient, id: u32, obj: std.json.ObjectMap) void {
         // Initialize response
         if (id == 0) {
-            // id=0 was our initialize request — not tracked via pending IDs
+            // id=1 was our initialize request (next_id starts at 1)
         }
 
         const result = obj.get("result") orelse return;
@@ -892,13 +892,21 @@ pub fn uriToPath(uri: []const u8) ?[]const u8 {
 fn getExt(path: []const u8) ?[]const u8 {
     // Find last '.' that comes after the last '/'
     var last_dot: ?usize = null;
-    var last_slash: usize = 0;
+    var last_slash: ?usize = null;
     for (path, 0..) |c, i| {
-        if (c == '/') last_slash = i;
+        if (c == '/' or c == '\\') last_slash = i;
         if (c == '.') last_dot = i;
     }
     const dot = last_dot orelse return null;
-    if (dot < last_slash) return null;
+    // Dot must be after the last slash
+    if (last_slash) |s| {
+        if (dot <= s) return null;
+        // Hidden file: dot is first char of filename (e.g. ".gitignore")
+        if (dot == s + 1) return null;
+    } else {
+        // No slash: dot at position 0 = hidden file
+        if (dot == 0) return null;
+    }
     if (dot + 1 >= path.len) return null;
     return path[dot + 1 ..];
 }

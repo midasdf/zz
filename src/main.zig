@@ -277,10 +277,14 @@ pub fn main() !void {
                                 if (should_open) {
                                     openFile(&editor, allocator, p, &lsp_client);
                                 }
-                                const target_off = editor.buffer.lineToOffset(loc.line) + loc.col;
-                                editor.cursor.moveTo(@min(target_off, editor.buffer.total_len));
-                                editor.ensureCursorVisible();
-                                editor.markAllDirty();
+                                // Only move cursor if current file matches the target
+                                const is_target = if (editor.file_path) |fp| std.mem.eql(u8, fp, p) else false;
+                                if (is_target) {
+                                    const target_off = editor.buffer.lineToOffset(loc.line) + loc.col;
+                                    editor.cursor.moveTo(@min(target_off, editor.buffer.total_len));
+                                    editor.ensureCursorVisible();
+                                    editor.markAllDirty();
+                                }
                             }
                         }
                     }
