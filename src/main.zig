@@ -270,10 +270,12 @@ pub fn main() !void {
                         lsp_client.has_goto = false;
                         if (lsp_client.goto_location) |loc| {
                             if (lsp.uriToPath(loc.uri)) |p| {
-                                if (editor.file_path) |current| {
-                                    if (!std.mem.eql(u8, p, current)) {
-                                        openFile(&editor, allocator, p, &lsp_client);
-                                    }
+                                const should_open = if (editor.file_path) |current|
+                                    !std.mem.eql(u8, p, current)
+                                else
+                                    true;
+                                if (should_open) {
+                                    openFile(&editor, allocator, p, &lsp_client);
                                 }
                                 const target_off = editor.buffer.lineToOffset(loc.line) + loc.col;
                                 editor.cursor.moveTo(@min(target_off, editor.buffer.total_len));
