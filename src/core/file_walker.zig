@@ -18,7 +18,12 @@ pub fn walkFiles(
     var ignore_patterns: std.ArrayList([]const u8) = .{};
     defer ignore_patterns.deinit(allocator);
 
-    const gitignore = std.fs.cwd().readFileAlloc(allocator, ".gitignore", 64 * 1024) catch null;
+    // Read .gitignore from root_path directory
+    var root_dir = std.fs.cwd().openDir(root_path, .{}) catch null;
+    const gitignore = if (root_dir) |*rd| blk: {
+        defer rd.close();
+        break :blk rd.readFileAlloc(allocator, ".gitignore", 64 * 1024) catch null;
+    } else null;
     if (gitignore) |content| {
         defer allocator.free(content);
         var lines = std.mem.splitScalar(u8, content, '\n');
@@ -107,13 +112,12 @@ fn isIgnored(rel_path: []const u8, name: []const u8, patterns: []const []const u
             const suffix = pat[1..];
             if (std.mem.endsWith(u8, name, suffix)) return true;
         } else if (std.mem.indexOfScalar(u8, pat, '/') != null) {
-            // Path pattern
-            if (std.mem.startsWith(u8, rel_path, pat)) return true;
+            // Path pattern — match on segment boundary
+            if (std.mem.startsWith(u8, rel_path, pat) and
+                (rel_path.len == pat.len or rel_path[pat.len] == '/')) return true;
         } else {
             // Simple name match
             if (std.mem.eql(u8, name, pat)) return true;
-            // Also check if directory name matches
-            if (std.mem.endsWith(u8, rel_path, pat)) return true;
         }
     }
     return false;

@@ -622,9 +622,15 @@ fn findNext(editor: *EditorView, query: []const u8) void {
 fn openFile(editor: *EditorView, allocator: std.mem.Allocator, path: []const u8) void {
     const new_content = std.fs.cwd().readFileAlloc(allocator, path, 100 * 1024 * 1024) catch return;
 
-    editor.buffer.deinit(); // Frees owned_original if set
-    editor.buffer = PieceTable.init(allocator, new_content) catch return;
-    editor.buffer.owned_original = new_content; // Transfer ownership to PieceTable
+    // Init new buffer BEFORE deiniting old — if init fails, keep old buffer
+    var new_buf = PieceTable.init(allocator, new_content) catch {
+        allocator.free(new_content);
+        return;
+    };
+    new_buf.owned_original = new_content;
+
+    editor.buffer.deinit(); // Safe: new buffer is ready
+    editor.buffer = new_buf;
     editor.cursor.moveTo(0);
     editor.scroll_line = 0;
     editor.modified = false;

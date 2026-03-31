@@ -84,7 +84,7 @@ pub const Overlay = struct {
         if (!self.active) return;
 
         const cell_w = font.cell_width;
-        const cell_h = font.cell_height;
+        const cell_h = if (font.cell_height > 0) font.cell_height else 1;
         const win_w = renderer.width;
         const win_h = renderer.height;
 
@@ -182,7 +182,8 @@ pub const Overlay = struct {
         {
             var count_buf: [32]u8 = undefined;
             const count_str = std.fmt.bufPrint(&count_buf, "{d} items", .{self.items.len}) catch "";
-            const count_x = box_x + box_w - @as(u32, @intCast(count_str.len + 1)) * cell_w;
+            const required_w = @as(u32, @intCast(count_str.len + 1)) * cell_w;
+            const count_x = if (box_w > required_w) box_x + box_w - required_w else box_x;
             for (count_str, 0..) |ch, ci| {
                 const glyph = font.getGlyph(ch) catch continue;
                 const gx: i32 = @intCast(count_x + @as(u32, @intCast(ci)) * cell_w);
