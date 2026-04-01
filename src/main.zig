@@ -408,12 +408,15 @@ pub fn main() !void {
                                     if (completion_active) {
                                         completion_active = false;
                                     }
-                                    editor.insertAtCursor(te.slice()) catch {};
+                                    const text = te.slice();
+                                    const auto_closed = editor.insertWithAutoClose(text) catch false;
+                                    if (!auto_closed) {
+                                        editor.insertAtCursor(text) catch {};
+                                    }
                                     notifyLspChange(editor, &lsp_client, allocator);
                                     resetCursorBlink(editor);
                                     // Auto-trigger completion after . : ( @
-                                    const typed = te.slice();
-                                    if (typed.len == 1 and (typed[0] == '.' or typed[0] == ':' or typed[0] == '(' or typed[0] == '@')) {
+                                    if (text.len == 1 and (text[0] == '.' or text[0] == ':' or text[0] == '(' or text[0] == '@')) {
                                         if (editor.file_path) |path| {
                                             var uri_buf2: [4096]u8 = undefined;
                                             const uri2 = lsp.formatUri(path, &uri_buf2);
@@ -835,7 +838,10 @@ fn handleAction(editor: *EditorView, win: *Window, action: keymap.Action, lsp_cl
             editor.markAllDirty();
         },
         .backspace => {
-            editor.backspace() catch {};
+            const pair_deleted = editor.backspaceWithPairDelete() catch false;
+            if (!pair_deleted) {
+                editor.backspace() catch {};
+            }
             notifyLspChange(editor, lsp_client, allocator);
             editor.markAllDirty();
         },

@@ -586,6 +586,95 @@ pub const EditorView = struct {
         const match_pos = self.findMatchingBracket();
         const match_lc = if (match_pos) |mp| self.buffer.offsetToLineCol(mp) else null;
 
+        // ── Word occurrence highlighting ──────────────────────────────
+        var word_highlights: [64]WordHighlight = undefined;
+        var word_hl_count: u32 = 0;
+
+        if (!has_sel and cursor_pos < self.buffer.total_len) {
+            // Find word boundaries at cursor
+            const cursor_slice = self.buffer.contiguousSliceAt(cursor_pos);
+            if (cursor_slice.len > 0 and isWordChar(cursor_slice[0])) {
+                var ws = cursor_pos;
+                while (ws > 0) {
+                    const s = self.buffer.contiguousSliceAt(ws - 1);
+                    if (s.len == 0 or !isWordChar(s[0])) break;
+                    ws -= 1;
+                }
+                var we = cursor_pos;
+                while (we < self.buffer.total_len) {
+                    const s = self.buffer.contiguousSliceAt(we);
+                    if (s.len == 0 or !isWordChar(s[0])) break;
+                    we += 1;
+                }
+
+                const word_len = we - ws;
+                if (word_len >= 2 and word_len <= 128) {
+                    // Collect word bytes from piece table
+                    var word_buf: [128]u8 = undefined;
+                    {
+                        var wi: u32 = 0;
+                        var wo = ws;
+                        while (wi < word_len) {
+                            const s = self.buffer.contiguousSliceAt(wo);
+                            if (s.len == 0) break;
+                            const n = @min(@as(u32, @intCast(s.len)), word_len - wi);
+                            @memcpy(word_buf[wi..][0..n], s[0..n]);
+                            wi += n;
+                            wo += n;
+                        }
+                    }
+                    const word = word_buf[0..word_len];
+
+                    // Search for occurrences in the visible byte range
+                    const vis_start = query_start;
+                    const vis_end_off = query_end;
+                    var search_pos = vis_start;
+                    while (search_pos + word_len <= vis_end_off and word_hl_count < 64) {
+                        // Check if content at search_pos matches the word
+                        var matches = true;
+                        var mi: u32 = 0;
+                        var mo = search_pos;
+                        while (mi < word_len) {
+                            const s = self.buffer.contiguousSliceAt(mo);
+                            if (s.len == 0) {
+                                matches = false;
+                                break;
+                            }
+                            const n = @min(@as(u32, @intCast(s.len)), word_len - mi);
+                            if (!std.mem.eql(u8, s[0..n], word[mi..][0..n])) {
+                                matches = false;
+                                break;
+                            }
+                            mi += n;
+                            mo += n;
+                        }
+
+                        if (matches) {
+                            // Check word boundaries
+                            const before_ok = search_pos == 0 or blk: {
+                                const bs = self.buffer.contiguousSliceAt(search_pos - 1);
+                                break :blk bs.len == 0 or !isWordChar(bs[0]);
+                            };
+                            const after_ok = search_pos + word_len >= self.buffer.total_len or blk: {
+                                const as2 = self.buffer.contiguousSliceAt(search_pos + word_len);
+                                break :blk as2.len == 0 or !isWordChar(as2[0]);
+                            };
+                            if (before_ok and after_ok) {
+                                word_highlights[word_hl_count] = .{
+                                    .start = search_pos,
+                                    .end = search_pos + word_len,
+                                };
+                                word_hl_count += 1;
+                            }
+                            search_pos += 1;
+                        } else {
+                            search_pos += 1;
+                        }
+                    }
+                }
+            }
+        }
+
         // Compute starting doc_line from scroll_line, accounting for folds.
         // byte_offset already points to scroll_line.
         var screen_row: u32 = 0;
@@ -651,7 +740,8 @@ pub const EditorView = struct {
 
             // -- Code area --
             if (doc_line < total_lines) {
-                self.renderCodeLine(renderer, font, byte_offset, doc_line, screen_row, code_x, line_bg, has_sel);
+                self.renderIndentGuides(renderer, font, byte_offset, screen_row, code_x);
+                self.renderCodeLine(renderer, font, byte_offset, doc_line, screen_row, code_x, line_bg, has_sel, word_highlights[0..word_hl_count]);
 
                 // -- Fold ellipsis indicator at end of fold-start line --
                 if (self.folded_lines.get(doc_line)) |fold_end| {
@@ -726,6 +816,9 @@ pub const EditorView = struct {
 
         // -- Minimap (code overview on right edge) --
         self.renderMinimap(renderer, font);
+
+        // -- Scrollbar indicator --
+        self.renderScrollbar(renderer, font);
 
         // -- Status bar --
         self.renderStatusBar(renderer, font, cursor_lc.line, cursor_lc.col);
@@ -946,6 +1039,9 @@ pub const EditorView = struct {
         }
     }
 
+    const WordHighlight = struct { start: u32, end: u32 };
+    const word_hl_bg = Color.fromHex(0x3b3d54); // Subtle word occurrence highlight
+
     fn renderCodeLine(
         self: *const EditorView,
         renderer: *Renderer,
@@ -956,6 +1052,7 @@ pub const EditorView = struct {
         code_x: u32,
         line_bg: Color,
         has_sel: bool,
+        word_highlights: []const WordHighlight,
     ) void {
         _ = doc_line;
         const cell_w = font.cell_width;
@@ -977,10 +1074,12 @@ pub const EditorView = struct {
             // Stop at end of line
             if (byte == '\n') break;
 
-            // Determine background: selection overrides current-line highlight
+            // Determine background: selection > word highlight > current-line
             var cell_bg = line_bg;
             if (has_sel and self.isInAnySelection(offset)) {
                 cell_bg = theme.surface1;
+            } else if (isInWordHighlight(offset, word_highlights)) {
+                cell_bg = word_hl_bg;
             }
 
             // Determine syntax color for this byte position
@@ -1043,6 +1142,51 @@ pub const EditorView = struct {
                 offset += cp_len;
             }
         }
+    }
+
+    fn isInWordHighlight(offset: u32, highlights: []const WordHighlight) bool {
+        for (highlights) |h| {
+            if (offset >= h.start and offset < h.end) return true;
+        }
+        return false;
+    }
+
+    // ── Scrollbar indicator ───────────────────────────────────────────
+
+    fn renderScrollbar(self: *const EditorView, renderer: *Renderer, font: *const FontFace) void {
+        const cell_h = font.cell_height;
+        if (cell_h == 0) return;
+
+        const total_lines = self.buffer.lineCount();
+        if (total_lines <= self.visible_rows) return; // No scrollbar needed
+
+        const pw = self.paneWidth(renderer.width);
+        const mm_offset: u32 = if (self.minimap_visible) self.minimap_width else 0;
+        if (pw <= mm_offset + 8) return; // pane too narrow
+        const bar_x = self.x_offset + pw - mm_offset - 8;
+        const bar_y = self.y_offset;
+        const bar_h = self.visible_rows * cell_h;
+        const bar_w: u32 = 6;
+
+        // Track background (very subtle)
+        renderer.fillRect(bar_x, bar_y, bar_w, bar_h, theme.surface0);
+
+        // Thumb: proportional to visible fraction, min 20px
+        const total_f = @as(f32, @floatFromInt(total_lines));
+        const visible_f = @as(f32, @floatFromInt(self.visible_rows));
+        const bar_h_f = @as(f32, @floatFromInt(bar_h));
+        const thumb_ratio = visible_f / total_f;
+        const thumb_h_f = @min(@max(bar_h_f * thumb_ratio, 20.0), bar_h_f);
+        const thumb_h: u32 = @intFromFloat(thumb_h_f);
+
+        const max_scroll = total_lines - self.visible_rows;
+        if (max_scroll == 0) return;
+        const scroll_ratio = @as(f32, @floatFromInt(self.scroll_line)) / @as(f32, @floatFromInt(max_scroll));
+        const thumb_travel = @max(bar_h_f - thumb_h_f, 0.0);
+        const thumb_y_offset: u32 = @intFromFloat(thumb_travel * scroll_ratio);
+        const thumb_y = bar_y + thumb_y_offset;
+
+        renderer.fillRect(bar_x, thumb_y, bar_w, thumb_h, theme.overlay0);
     }
 
     fn renderDiagnostics(
@@ -1624,6 +1768,114 @@ pub const EditorView = struct {
             off -= 1;
         }
         return null;
+    }
+
+    // ── Indent guides ────────────────────────────────────────────────
+
+    fn renderIndentGuides(self: *const EditorView, renderer: *Renderer, font: *const FontFace, line_start_offset: u32, screen_row: u32, code_x: u32) void {
+        const cell_w = font.cell_width;
+        const cell_h = font.cell_height;
+        if (cell_w == 0 or cell_h == 0) return;
+        const row_y = self.y_offset + screen_row * cell_h;
+        const tab_size: u32 = 4;
+
+        // Count leading whitespace (in columns)
+        var indent: u32 = 0;
+        var off = line_start_offset;
+        while (off < self.buffer.total_len) {
+            const s = self.buffer.contiguousSliceAt(off);
+            if (s.len == 0) break;
+            if (s[0] == ' ') {
+                indent += 1;
+                off += 1;
+            } else if (s[0] == '\t') {
+                indent = ((indent / tab_size) + 1) * tab_size;
+                off += 1;
+            } else {
+                break;
+            }
+        }
+
+        // Draw vertical guide lines at each tab stop within the indent
+        const guide_color = theme.surface2;
+        var level: u32 = tab_size;
+        while (level < indent) : (level += tab_size) {
+            const guide_x = code_x + self.left_pad + level * cell_w;
+            renderer.fillRect(guide_x, row_y, 1, cell_h, guide_color);
+        }
+    }
+
+    // ── Auto-closing brackets/quotes ─────────────────────────────────
+
+    pub fn insertWithAutoClose(self: *EditorView, text: []const u8) !bool {
+        if (text.len != 1) return false;
+
+        const ch = text[0];
+        const pair: ?u8 = switch (ch) {
+            '(' => @as(u8, ')'),
+            '[' => @as(u8, ']'),
+            '{' => @as(u8, '}'),
+            '"' => @as(u8, '"'),
+            '\'' => @as(u8, '\''),
+            '`' => @as(u8, '`'),
+            else => null,
+        };
+
+        const close = pair orelse return false;
+
+        // For quotes: don't auto-close if previous char is alphanumeric (mid-word)
+        if (ch == '"' or ch == '\'' or ch == '`') {
+            const pos = self.cursor.primary().head;
+            if (pos > 0) {
+                const prev = self.buffer.contiguousSliceAt(pos - 1);
+                if (prev.len > 0 and isWordChar(prev[0])) return false;
+            }
+        }
+
+        // Skip-over: if next char is the same closing char, just move past it
+        const pos = self.cursor.primary().head;
+        if (pos < self.buffer.total_len) {
+            const next = self.buffer.contiguousSliceAt(pos);
+            if (next.len > 0 and next[0] == close and ch == close) {
+                self.cursor.moveTo(pos + 1);
+                self.markAllDirty();
+                return true;
+            }
+        }
+
+        // Insert both chars, position cursor between them
+        var buf: [2]u8 = .{ ch, close };
+        try self.insertAtCursor(&buf);
+        // Move cursor back one position (between the pair)
+        self.cursor.moveTo(self.cursor.primary().head - 1);
+        return true;
+    }
+
+    pub fn backspaceWithPairDelete(self: *EditorView) !bool {
+        const pos = self.cursor.primary().head;
+        if (pos == 0 or pos >= self.buffer.total_len) return false;
+
+        const prev = self.buffer.contiguousSliceAt(pos - 1);
+        const next = self.buffer.contiguousSliceAt(pos);
+        if (prev.len == 0 or next.len == 0) return false;
+
+        const is_pair = (prev[0] == '(' and next[0] == ')') or
+            (prev[0] == '[' and next[0] == ']') or
+            (prev[0] == '{' and next[0] == '}') or
+            (prev[0] == '"' and next[0] == '"') or
+            (prev[0] == '\'' and next[0] == '\'') or
+            (prev[0] == '`' and next[0] == '`');
+
+        if (is_pair) {
+            try self.buffer.delete(pos - 1, 2);
+            self.highlighter.notifyEdit(&self.buffer, pos - 1, pos + 1, pos - 1);
+            self.cursor.moveTo(pos - 1);
+            self.modified = true;
+            self.ensureCursorVisible();
+            self.markAllDirty();
+            return true;
+        }
+        return false;
     }
 };
 
