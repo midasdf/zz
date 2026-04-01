@@ -10,6 +10,8 @@ pub const PieceTable = struct {
     undo_stack: std.ArrayList(UndoEntry),
     redo_stack: std.ArrayList(UndoEntry),
     last_edit_pos: ?u32 = null, // For undo coalescing
+    line_offsets: std.ArrayList(u32), // line_offsets[i] = byte offset of line i
+    line_cache_valid: bool = false,
 
     pub const Source = enum { original, add };
 
@@ -47,6 +49,7 @@ pub const PieceTable = struct {
             .allocator = allocator,
             .undo_stack = .{},
             .redo_stack = .{},
+            .line_offsets = .{},
         };
     }
 
@@ -58,6 +61,7 @@ pub const PieceTable = struct {
         self.undo_stack.deinit(self.allocator);
         for (self.redo_stack.items) |*entry| entry.deinit(self.allocator);
         self.redo_stack.deinit(self.allocator);
+        self.line_offsets.deinit(self.allocator);
     }
 
     pub fn countNewlines(data: []const u8) u32 {
@@ -76,12 +80,37 @@ pub const PieceTable = struct {
         return buf[piece.start..][0..piece.len];
     }
 
-    pub fn lineCount(self: *const PieceTable) u32 {
-        var total: u32 = 0;
-        for (self.pieces.items) |p| {
-            total += p.newline_count;
+    fn rebuildLineCache(self: *PieceTable) void {
+        self.line_offsets.clearRetainingCapacity();
+        // Line 0 always starts at offset 0
+        self.line_offsets.append(self.allocator, 0) catch return;
+
+        var offset: u32 = 0;
+        for (self.pieces.items) |piece| {
+            const content = self.pieceContent(piece);
+            for (content) |byte| {
+                offset += 1;
+                if (byte == '\n') {
+                    self.line_offsets.append(self.allocator, offset) catch return;
+                }
+            }
         }
-        return total + 1;
+        self.line_cache_valid = true;
+    }
+
+    fn ensureLineCache(self: *const PieceTable) void {
+        if (!self.line_cache_valid) {
+            @constCast(self).rebuildLineCache();
+        }
+    }
+
+    fn invalidateLineCache(self: *PieceTable) void {
+        self.line_cache_valid = false;
+    }
+
+    pub fn lineCount(self: *const PieceTable) u32 {
+        self.ensureLineCache();
+        return @intCast(self.line_offsets.items.len);
     }
 
     // --- Undo helpers ---
@@ -118,6 +147,7 @@ pub const PieceTable = struct {
         try self.pieces.appendSlice(self.allocator, entry.pieces_snapshot);
         self.total_len = entry.total_len;
         entry.deinit(self.allocator);
+        self.invalidateLineCache();
 
         return true;
     }
@@ -137,6 +167,7 @@ pub const PieceTable = struct {
         try self.pieces.appendSlice(self.allocator, entry.pieces_snapshot);
         self.total_len = entry.total_len;
         entry.deinit(self.allocator);
+        self.invalidateLineCache();
 
         return true;
     }
@@ -169,6 +200,7 @@ pub const PieceTable = struct {
         if (self.pieces.items.len == 0) {
             try self.pieces.append(self.allocator, new_piece);
             self.total_len += @intCast(text.len);
+            self.invalidateLineCache();
             return;
         }
 
@@ -211,6 +243,7 @@ pub const PieceTable = struct {
         }
 
         self.total_len += @intCast(text.len);
+        self.invalidateLineCache();
     }
 
     pub fn delete(self: *PieceTable, pos: u32, len: u32) !void {
@@ -258,6 +291,7 @@ pub const PieceTable = struct {
         self.pieces.deinit(self.allocator);
         self.pieces = new_pieces;
         self.total_len -= len;
+        self.invalidateLineCache();
     }
 
     // --- Content access ---
@@ -295,45 +329,29 @@ pub const PieceTable = struct {
     // --- Line/offset conversion ---
 
     pub fn lineToOffset(self: *const PieceTable, target_line: u32) u32 {
-        if (target_line == 0) return 0;
-
-        var line: u32 = 0;
-        var offset: u32 = 0;
-        for (self.pieces.items) |piece| {
-            if (line + piece.newline_count >= target_line) {
-                const content = self.pieceContent(piece);
-                for (content) |byte| {
-                    if (byte == '\n') {
-                        line += 1;
-                        if (line == target_line) return offset + 1;
-                    }
-                    offset += 1;
-                }
-            } else {
-                line += piece.newline_count;
-                offset += piece.len;
-            }
+        self.ensureLineCache();
+        if (target_line < self.line_offsets.items.len) {
+            return self.line_offsets.items[target_line];
         }
-        return offset;
+        return self.total_len;
     }
 
     pub fn offsetToLineCol(self: *const PieceTable, target_offset: u32) struct { line: u32, col: u32 } {
-        var line: u32 = 0;
-        var col: u32 = 0;
-        var offset: u32 = 0;
-        for (self.pieces.items) |piece| {
-            const content = self.pieceContent(piece);
-            for (content) |byte| {
-                if (offset == target_offset) return .{ .line = line, .col = col };
-                if (byte == '\n') {
-                    line += 1;
-                    col = 0;
-                } else {
-                    col += 1;
-                }
-                offset += 1;
+        self.ensureLineCache();
+        const offsets = self.line_offsets.items;
+        // Binary search for the line containing target_offset
+        var lo: u32 = 0;
+        var hi: u32 = @intCast(offsets.len);
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            if (offsets[mid] <= target_offset) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
             }
         }
+        const line = if (lo > 0) lo - 1 else 0;
+        const col = target_offset - offsets[line];
         return .{ .line = line, .col = col };
     }
 };
@@ -545,4 +563,54 @@ test "undo non-coalesced edits" {
     try expectContent(&buf, "hello");
     _ = try buf.undo();
     try expectContent(&buf, "");
+}
+
+test "line cache matches sequential scan" {
+    var buf = try PieceTable.init(std.testing.allocator, "line1\nline2\nline3\n");
+    defer buf.deinit();
+
+    // These should use cache
+    try std.testing.expectEqual(@as(u32, 0), buf.lineToOffset(0));
+    try std.testing.expectEqual(@as(u32, 6), buf.lineToOffset(1));
+    try std.testing.expectEqual(@as(u32, 12), buf.lineToOffset(2));
+    try std.testing.expectEqual(@as(u32, 18), buf.lineToOffset(3));
+    try std.testing.expectEqual(@as(u32, 4), buf.lineCount());
+
+    // After edit, cache should invalidate and rebuild
+    // "line1\nline2\nline3\n" -> insert "new " at 6 -> "line1\nnew line2\nline3\n"
+    try buf.insert(6, "new ");
+    try std.testing.expectEqual(@as(u32, 6), buf.lineToOffset(1)); // line 1 still starts at offset 6
+    try std.testing.expectEqual(@as(u32, 16), buf.lineToOffset(2)); // line 2 shifted by 4
+
+    // offsetToLineCol binary search: offset 10 = "new l" -> line 1, col 4
+    const lc = buf.offsetToLineCol(10);
+    try std.testing.expectEqual(@as(u32, 1), lc.line);
+    try std.testing.expectEqual(@as(u32, 4), lc.col);
+}
+
+test "line cache after delete and undo" {
+    var buf = try PieceTable.init(std.testing.allocator, "a\nb\nc\n");
+    defer buf.deinit();
+
+    try std.testing.expectEqual(@as(u32, 4), buf.lineCount());
+    try buf.delete(2, 2); // delete "b\n"
+    try std.testing.expectEqual(@as(u32, 3), buf.lineCount());
+    try std.testing.expectEqual(@as(u32, 2), buf.lineToOffset(1));
+
+    _ = try buf.undo();
+    try std.testing.expectEqual(@as(u32, 4), buf.lineCount());
+    try std.testing.expectEqual(@as(u32, 2), buf.lineToOffset(1));
+}
+
+test "line cache empty buffer" {
+    var buf = try PieceTable.init(std.testing.allocator, "");
+    defer buf.deinit();
+
+    try std.testing.expectEqual(@as(u32, 1), buf.lineCount());
+    try std.testing.expectEqual(@as(u32, 0), buf.lineToOffset(0));
+    try std.testing.expectEqual(@as(u32, 0), buf.lineToOffset(1)); // beyond last line
+
+    const lc = buf.offsetToLineCol(0);
+    try std.testing.expectEqual(@as(u32, 0), lc.line);
+    try std.testing.expectEqual(@as(u32, 0), lc.col);
 }

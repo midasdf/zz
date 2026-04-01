@@ -18,6 +18,9 @@ const lsp = @import("lsp/client.zig");
 const FileTree = @import("ui/file_tree.zig").FileTree;
 const GitInfo = @import("core/git.zig").GitInfo;
 const Terminal = @import("ui/terminal.zig").Terminal;
+const search_ops = @import("core/search_ops.zig");
+const lsp_ops = @import("core/lsp_ops.zig");
+const popups = @import("ui/popups.zig");
 
 const EditorMode = enum {
     normal,
@@ -268,9 +271,9 @@ pub fn main() !void {
                                         if (completion_selected < lsp_client.completion_items.items.len) {
                                             const item = lsp_client.completion_items.items[completion_selected];
                                             // Delete the partial word being typed, then insert completion
-                                            deleteWordBeforeCursor(editor);
+                                            lsp_ops.deleteWordBeforeCursor(editor);
                                             editor.insertAtCursor(item.label) catch {};
-                                            notifyLspChange(editor, &lsp_client, allocator);
+                                            lsp_ops.notifyLspChange(editor, &lsp_client, allocator);
                                         }
                                         completion_active = false;
                                         editor.markAllDirty();
@@ -446,7 +449,7 @@ pub fn main() !void {
                                     if (!auto_closed) {
                                         editor.insertAtCursor(text) catch {};
                                     }
-                                    notifyLspChange(editor, &lsp_client, allocator);
+                                    lsp_ops.notifyLspChange(editor, &lsp_client, allocator);
                                     resetCursorBlink(editor);
                                     // Auto-trigger completion after . : ( @
                                     if (text.len == 1 and (text[0] == '.' or text[0] == ':' or text[0] == '(' or text[0] == '@')) {
@@ -593,7 +596,7 @@ pub fn main() !void {
                                 } else {
                                     const active = pane_mgr.active_leaf;
                                     active.insertAtCursor(pe.data) catch {};
-                                    notifyLspChange(active, &lsp_client, allocator);
+                                    lsp_ops.notifyLspChange(active, &lsp_client, allocator);
                                     resetCursorBlink(editor);
                                 }
                                 pe.deinit();
@@ -660,8 +663,8 @@ pub fn main() !void {
                     if (lsp_client.has_formatting) {
                         lsp_client.has_formatting = false;
                         if (lsp_client.formatting_edits.items.len > 0) {
-                            applyFormattingEdits(editor, &lsp_client);
-                            notifyLspChange(editor, &lsp_client, allocator);
+                            lsp_ops.applyFormattingEdits(editor, &lsp_client);
+                            lsp_ops.notifyLspChange(editor, &lsp_client, allocator);
                         }
                         // Format-on-save: auto-save after formatting completes
                         if (format_then_save) {
@@ -706,8 +709,8 @@ pub fn main() !void {
                         lsp_client.has_symbols = false;
                         if (mode == .goto_symbol) {
                             // Refresh the overlay with new symbols
-                            freeSymbolDisplay(&filtered_display, allocator);
-                            populateSymbolDisplay(&lsp_client, &filtered_display, allocator, overlay.inputSlice());
+                            lsp_ops.freeSymbolDisplay(&filtered_display, allocator);
+                            lsp_ops.populateSymbolDisplay(&lsp_client, &filtered_display, allocator, overlay.inputSlice());
                             overlay.items = filtered_display.items;
                             editor.markAllDirty();
                         }
@@ -717,7 +720,7 @@ pub fn main() !void {
                     if (lsp_client.has_rename) {
                         lsp_client.has_rename = false;
                         applyRenameEdits(editor, &lsp_client, &tab_mgr, &pane_mgr, allocator, &font, &git_info);
-                        notifyLspChange(editor, &lsp_client, allocator);
+                        lsp_ops.notifyLspChange(editor, &lsp_client, allocator);
                     }
 
                     // Handle code action response
@@ -738,7 +741,7 @@ pub fn main() !void {
                     if (lsp_client.has_references) {
                         lsp_client.has_references = false;
                         if (lsp_client.references.items.len > 0 and mode == .goto_references) {
-                            populateReferencesDisplay(&lsp_client, &filtered_display, allocator);
+                            lsp_ops.populateReferencesDisplay(&lsp_client, &filtered_display, allocator);
                             overlay.items = filtered_display.items;
                             editor.markAllDirty();
                         }
@@ -929,25 +932,25 @@ fn handleAction(editor: *EditorView, win: *Window, action: keymap.Action, lsp_cl
             if (!pair_deleted) {
                 editor.backspace() catch {};
             }
-            notifyLspChange(editor, lsp_client, allocator);
+            lsp_ops.notifyLspChange(editor, lsp_client, allocator);
             editor.markAllDirty();
         },
         .delete => {
             editor.deleteForward() catch {};
-            notifyLspChange(editor, lsp_client, allocator);
+            lsp_ops.notifyLspChange(editor, lsp_client, allocator);
             editor.markAllDirty();
         },
         .delete_word_left => {
             editor.deleteWordLeft() catch {};
-            notifyLspChange(editor, lsp_client, allocator);
+            lsp_ops.notifyLspChange(editor, lsp_client, allocator);
         },
         .delete_word_right => {
             editor.deleteWordRight() catch {};
-            notifyLspChange(editor, lsp_client, allocator);
+            lsp_ops.notifyLspChange(editor, lsp_client, allocator);
         },
         .enter => {
             editor.insertNewline() catch {};
-            notifyLspChange(editor, lsp_client, allocator);
+            lsp_ops.notifyLspChange(editor, lsp_client, allocator);
         },
         .tab => {
             if (editor.cursor.primary().hasSelection()) {
@@ -955,7 +958,7 @@ fn handleAction(editor: *EditorView, win: *Window, action: keymap.Action, lsp_cl
             } else {
                 editor.insertAtCursor("    ") catch {};
             }
-            notifyLspChange(editor, lsp_client, allocator);
+            lsp_ops.notifyLspChange(editor, lsp_client, allocator);
         },
         .copy => {
             if (editor.getSelectedText()) |text| {
@@ -966,7 +969,7 @@ fn handleAction(editor: *EditorView, win: *Window, action: keymap.Action, lsp_cl
             if (editor.getSelectedText()) |text| {
                 win.setClipboard(text);
                 editor.deleteSelection() catch {};
-                notifyLspChange(editor, lsp_client, allocator);
+                lsp_ops.notifyLspChange(editor, lsp_client, allocator);
             }
         },
         .paste => {
@@ -1020,19 +1023,19 @@ fn handleAction(editor: *EditorView, win: *Window, action: keymap.Action, lsp_cl
         },
         .duplicate_line => {
             editor.duplicateLine() catch {};
-            notifyLspChange(editor, lsp_client, allocator);
+            lsp_ops.notifyLspChange(editor, lsp_client, allocator);
         },
         .move_line_up => {
             editor.moveLineUp() catch {};
-            notifyLspChange(editor, lsp_client, allocator);
+            lsp_ops.notifyLspChange(editor, lsp_client, allocator);
         },
         .move_line_down => {
             editor.moveLineDown() catch {};
-            notifyLspChange(editor, lsp_client, allocator);
+            lsp_ops.notifyLspChange(editor, lsp_client, allocator);
         },
         .delete_line => {
             editor.deleteLine() catch {};
-            notifyLspChange(editor, lsp_client, allocator);
+            lsp_ops.notifyLspChange(editor, lsp_client, allocator);
         },
         // These are handled before reaching handleAction
         .command_palette, .finder_files, .find, .goto_line, .find_in_project, .find_replace => {},
@@ -1044,7 +1047,7 @@ fn handleAction(editor: *EditorView, win: *Window, action: keymap.Action, lsp_cl
         .rename_symbol, .code_action, .goto_references => {},
         .toggle_comment => {
             editor.toggleComment() catch {};
-            notifyLspChange(editor, lsp_client, allocator);
+            lsp_ops.notifyLspChange(editor, lsp_client, allocator);
             editor.markAllDirty();
         },
         .select_line => {
@@ -1052,19 +1055,19 @@ fn handleAction(editor: *EditorView, win: *Window, action: keymap.Action, lsp_cl
         },
         .join_lines => {
             editor.joinLines() catch {};
-            notifyLspChange(editor, lsp_client, allocator);
+            lsp_ops.notifyLspChange(editor, lsp_client, allocator);
         },
         .insert_line_below => {
             editor.insertLineBelow() catch {};
-            notifyLspChange(editor, lsp_client, allocator);
+            lsp_ops.notifyLspChange(editor, lsp_client, allocator);
         },
         .insert_line_above => {
             editor.insertLineAbove() catch {};
-            notifyLspChange(editor, lsp_client, allocator);
+            lsp_ops.notifyLspChange(editor, lsp_client, allocator);
         },
         .outdent_lines => {
             editor.outdentSelectedLines() catch {};
-            notifyLspChange(editor, lsp_client, allocator);
+            lsp_ops.notifyLspChange(editor, lsp_client, allocator);
         },
         .goto_file_start => {
             editor.cursor.moveTo(0);
@@ -1109,15 +1112,6 @@ fn handleAction(editor: *EditorView, win: *Window, action: keymap.Action, lsp_cl
             editor.markAllDirty();
         },
     }
-}
-
-fn notifyLspChange(editor: *EditorView, lsp_client: *lsp.LspClient, allocator: std.mem.Allocator) void {
-    const path = editor.file_path orelse return;
-    var uri_buf: [4096]u8 = undefined;
-    const uri = lsp.formatUri(path, &uri_buf);
-    const content = editor.buffer.collectContent(allocator) catch return;
-    defer allocator.free(content);
-    lsp_client.didChange(uri, content);
 }
 
 fn moveVertical(editor: *EditorView, delta: i32, extend: bool) void {
@@ -1329,14 +1323,14 @@ fn renderFrame(
     // Completion popup
     if (comp_active and lsp_client.completion_items.items.len > 0) {
         const active_ed = pane_mgr.active_leaf;
-        renderCompletionPopup(&renderer, font, lsp_client.completion_items.items, comp_selected, active_ed);
+        popups.renderCompletionPopup(&renderer, font, lsp_client.completion_items.items, comp_selected, active_ed);
     }
 
     // Hover tooltip
     if (show_hover) {
         if (lsp_client.hover_text) |hover_text| {
             const active_ed = pane_mgr.active_leaf;
-            renderHoverTooltip(&renderer, font, hover_text, active_ed);
+            popups.renderHoverTooltip(&renderer, font, hover_text, active_ed);
         }
     }
 
@@ -1344,7 +1338,7 @@ fn renderFrame(
     if (show_signature) {
         if (lsp_client.signature) |sig| {
             const active_ed = pane_mgr.active_leaf;
-            renderSignatureHelp(&renderer, font, sig, active_ed);
+            popups.renderSignatureHelp(&renderer, font, sig, active_ed);
         }
     }
 
@@ -1463,14 +1457,14 @@ fn openRename(mode: *EditorMode, overlay: *Overlay, editor: *EditorView) void {
     while (start > 0) {
         const slice = editor.buffer.contiguousSliceAt(start - 1);
         if (slice.len == 0) break;
-        if (!isWordByte(slice[0])) break;
+        if (!lsp_ops.isWordByte(slice[0])) break;
         start -= 1;
     }
     var end = pos;
     while (end < editor.buffer.total_len) {
         const slice = editor.buffer.contiguousSliceAt(end);
         if (slice.len == 0) break;
-        if (!isWordByte(slice[0])) break;
+        if (!lsp_ops.isWordByte(slice[0])) break;
         end += 1;
     }
     // Copy word into overlay input
@@ -1576,10 +1570,10 @@ fn handleOverlayKey(
 
     if (keysym == window_mod.XK_Escape) {
         if (mode.* == .goto_symbol) {
-            freeSymbolDisplay(filtered_display, allocator);
+            lsp_ops.freeSymbolDisplay(filtered_display, allocator);
         }
         if (mode.* == .goto_references) {
-            freeRefDisplay(filtered_display, allocator);
+            lsp_ops.freeRefDisplay(filtered_display, allocator);
         }
         if (mode.* == .code_action) {
             filtered_display.clearRetainingCapacity();
@@ -1618,7 +1612,7 @@ fn handleOverlayKey(
             },
             .search => {
                 const query = overlay.inputSlice();
-                findNext(editor, query);
+                search_ops.findNext(editor, query);
             },
             .command_palette => {
                 if (overlay.selectedItem()) |cmd_name| {
@@ -1628,7 +1622,7 @@ fn handleOverlayKey(
             .project_search => {
                 if (overlay.selectedItem()) |result| {
                     // Parse "path:line: content" format
-                    if (parseSearchResult(result)) |parsed| {
+                    if (search_ops.parseSearchResult(result)) |parsed| {
                         openFileInTab(tab_mgr, allocator, parsed.path, lsp_client, font, git_info);
                         syncPaneToActiveTab(pane_mgr, tab_mgr);
                         const view = tab_mgr.activeView();
@@ -1646,8 +1640,8 @@ fn handleOverlayKey(
                 const query = overlay.inputSlice();
                 const replacement = replace_buf[0..replace_len.*];
                 if (query.len > 0) {
-                    replaceCurrentAndFindNext(editor, query, replacement, allocator);
-                    notifyLspChange(editor, lsp_client, allocator);
+                    search_ops.replaceCurrentAndFindNext(editor, query, replacement, allocator);
+                    lsp_ops.notifyLspChange(editor, lsp_client, allocator);
                 }
                 // Don't close overlay -- allow multiple replacements
                 editor.markAllDirty();
@@ -1672,7 +1666,7 @@ fn handleOverlayKey(
                     }
                 }
                 // Free allocated display strings before closing
-                freeSymbolDisplay(filtered_display, allocator);
+                lsp_ops.freeSymbolDisplay(filtered_display, allocator);
             },
             .rename => {
                 // Send rename request with the new name from overlay input
@@ -1694,8 +1688,8 @@ fn handleOverlayKey(
                         const ca = lsp_client.code_actions.items[sel_idx];
                         if (ca.edits.items.len > 0) {
                             // Apply edits to the current file (same-file only)
-                            applyCodeActionEdits(editor, ca.edits.items);
-                            notifyLspChange(editor, lsp_client, allocator);
+                            lsp_ops.applyCodeActionEdits(editor, ca.edits.items);
+                            lsp_ops.notifyLspChange(editor, lsp_client, allocator);
                         }
                     }
                 }
@@ -1727,7 +1721,7 @@ fn handleOverlayKey(
                         }
                     }
                 }
-                freeRefDisplay(filtered_display, allocator);
+                lsp_ops.freeRefDisplay(filtered_display, allocator);
             },
             .normal => {},
         }
@@ -1806,7 +1800,7 @@ fn updateOverlayResults(
 
             if (query.len >= 2) {
                 if (file_list) |files| {
-                    searchInFiles(allocator, query, files, 100, search_results);
+                    search_ops.searchInFiles(allocator, query, files, 100, search_results);
                     for (search_results.items) |r| {
                         filtered_display.append(allocator, r) catch {};
                     }
@@ -1815,8 +1809,8 @@ fn updateOverlayResults(
         },
         .goto_symbol => {
             if (lsp_client) |lc| {
-                freeSymbolDisplay(filtered_display, allocator);
-                populateSymbolDisplay(lc, filtered_display, allocator, query);
+                lsp_ops.freeSymbolDisplay(filtered_display, allocator);
+                lsp_ops.populateSymbolDisplay(lc, filtered_display, allocator, query);
             }
         },
         else => {
@@ -1827,141 +1821,6 @@ fn updateOverlayResults(
     overlay.items = filtered_display.items;
     overlay.selected = 0;
     overlay.scroll_offset = 0;
-}
-
-// ── Find next occurrence in buffer ────────────────────────────────
-
-// ── Project-wide search ─────────────────────────────────────────
-
-fn searchInFiles(
-    allocator: std.mem.Allocator,
-    query: []const u8,
-    files: []const []const u8,
-    max_results: usize,
-    results: *std.ArrayList([]u8),
-) void {
-    for (files) |file_path| {
-        if (results.items.len >= max_results) break;
-        const content = std.fs.cwd().readFileAlloc(allocator, file_path, 1024 * 1024) catch continue;
-        defer allocator.free(content);
-
-        var line_num: u32 = 1;
-        var lines = std.mem.splitScalar(u8, content, '\n');
-        while (lines.next()) |line| {
-            if (results.items.len >= max_results) break;
-            if (containsIgnoreCase(line, query)) {
-                const trimmed = std.mem.trim(u8, line, " \t\r");
-                const preview_len = @min(trimmed.len, 60);
-                const result = std.fmt.allocPrint(allocator, "{s}:{d}: {s}", .{ file_path, line_num, trimmed[0..preview_len] }) catch continue;
-                results.append(allocator, result) catch {
-                    allocator.free(result);
-                    continue;
-                };
-            }
-            line_num += 1;
-        }
-    }
-}
-
-fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
-    if (needle.len == 0) return true;
-    if (haystack.len < needle.len) return false;
-    const end = haystack.len - needle.len + 1;
-    var i: usize = 0;
-    while (i < end) : (i += 1) {
-        var match = true;
-        for (needle, 0..) |nc, j| {
-            const hc = haystack[i + j];
-            const hn = if (hc >= 'A' and hc <= 'Z') hc + 32 else hc;
-            const nn = if (nc >= 'A' and nc <= 'Z') nc + 32 else nc;
-            if (hn != nn) {
-                match = false;
-                break;
-            }
-        }
-        if (match) return true;
-    }
-    return false;
-}
-
-const ParsedSearchResult = struct {
-    path: []const u8,
-    line: u32,
-};
-
-fn parseSearchResult(result: []const u8) ?ParsedSearchResult {
-    // Format: "path:line: content"
-    // Find the line number by looking for :DIGITS: pattern
-    // Scan for a colon followed by digits followed by colon
-    var i: usize = 0;
-    while (i < result.len) {
-        if (result[i] == ':' and i + 1 < result.len) {
-            // Check if digits follow
-            var j = i + 1;
-            while (j < result.len and result[j] >= '0' and result[j] <= '9') j += 1;
-            if (j > i + 1 and j < result.len and result[j] == ':') {
-                // Found :DIGITS: pattern
-                const line_str = result[i + 1 .. j];
-                const line_num = std.fmt.parseInt(u32, line_str, 10) catch {
-                    i += 1;
-                    continue;
-                };
-                return .{ .path = result[0..i], .line = line_num };
-            }
-        }
-        i += 1;
-    }
-    return null;
-}
-
-fn findNext(editor: *EditorView, query: []const u8) void {
-    if (query.len == 0) return;
-    const content = editor.buffer.collectContent(editor.allocator) catch return;
-    defer editor.allocator.free(content);
-
-    const cursor_pos = editor.cursor.primary().head;
-    const start: usize = @min(@as(usize, cursor_pos) + 1, content.len);
-
-    // Search forward from cursor
-    if (start < content.len) {
-        if (std.mem.indexOf(u8, content[start..], query)) |pos| {
-            const abs_pos: u32 = @intCast(start + pos);
-            const end_pos: u32 = abs_pos + @as(u32, @intCast(query.len));
-            editor.cursor.cursors.items[0] = .{ .anchor = abs_pos, .head = end_pos };
-            editor.ensureCursorVisible();
-            return;
-        }
-    }
-    // Wrap around
-    if (std.mem.indexOf(u8, content, query)) |pos| {
-        const abs_pos: u32 = @intCast(pos);
-        const end_pos: u32 = abs_pos + @as(u32, @intCast(query.len));
-        editor.cursor.cursors.items[0] = .{ .anchor = abs_pos, .head = end_pos };
-        editor.ensureCursorVisible();
-    }
-}
-
-fn replaceCurrentAndFindNext(editor: *EditorView, query: []const u8, replacement: []const u8, allocator: std.mem.Allocator) void {
-    if (query.len == 0) return;
-
-    const sel = editor.cursor.primary();
-    // Check if current selection matches the search query
-    if (sel.hasSelection()) {
-        const selected = editor.getSelectedText() orelse {
-            findNext(editor, query);
-            return;
-        };
-        defer allocator.free(selected);
-
-        if (std.mem.eql(u8, selected, query)) {
-            // Replace the current selection
-            editor.deleteSelection() catch return;
-            editor.insertAtCursor(replacement) catch return;
-        }
-    }
-
-    // Find next occurrence
-    findNext(editor, query);
 }
 
 // ── Open a file in a tab (reuse existing or create new) ──────────
@@ -2094,86 +1953,6 @@ fn executeCommand(cmd_name: []const u8, editor: *EditorView, tab_mgr: *TabManage
     // They are no-ops from the palette for now.
 }
 
-
-// ── Delete word before cursor (for completion insertion) ────────
-
-fn deleteWordBeforeCursor(editor: *EditorView) void {
-    const pos = editor.cursor.primary().head;
-    if (pos == 0) return;
-
-    var start = pos;
-    while (start > 0) {
-        const slice = editor.buffer.contiguousSliceAt(start - 1);
-        if (slice.len == 0) break;
-        if (!isWordByte(slice[0])) break;
-        start -= 1;
-    }
-
-    if (start == pos) return;
-
-    const del_len = pos - start;
-    editor.buffer.delete(start, del_len) catch return;
-    editor.cursor.moveTo(start);
-    editor.markAllDirty();
-}
-
-fn isWordByte(b: u8) bool {
-    return (b >= 'a' and b <= 'z') or
-        (b >= 'A' and b <= 'Z') or
-        (b >= '0' and b <= '9') or
-        b == '_';
-}
-
-// ── Apply LSP formatting edits ──────────────────────────────────
-
-fn applyFormattingEdits(editor: *EditorView, lsp_client: *lsp.LspClient) void {
-    const items = lsp_client.formatting_edits.items;
-    if (items.len == 0) return;
-
-    // Build index array sorted descending by position (back-to-front)
-    const sorted = editor.allocator.alloc(usize, items.len) catch return;
-    defer editor.allocator.free(sorted);
-    for (sorted, 0..) |*s, i| s.* = i;
-
-    // Insertion sort descending by position
-    var sort_i: usize = 1;
-    while (sort_i < sorted.len) : (sort_i += 1) {
-        var j = sort_i;
-        while (j > 0) {
-            const a = items[sorted[j]];
-            const b = items[sorted[j - 1]];
-            if (a.start_line > b.start_line or (a.start_line == b.start_line and a.start_col > b.start_col)) {
-                const tmp = sorted[j];
-                sorted[j] = sorted[j - 1];
-                sorted[j - 1] = tmp;
-                j -= 1;
-            } else break;
-        }
-    }
-
-    const saved_pos = editor.cursor.primary().head;
-
-    for (sorted) |idx| {
-        const edit = items[idx];
-        const start_off = editor.buffer.lineToOffset(edit.start_line) + edit.start_col;
-        const end_off = editor.buffer.lineToOffset(edit.end_line) + edit.end_col;
-        const del_len = if (end_off > start_off) end_off - start_off else 0;
-
-        if (del_len > 0) {
-            editor.buffer.delete(start_off, del_len) catch continue;
-        }
-        if (edit.new_text.len > 0) {
-            editor.buffer.insert(start_off, edit.new_text) catch continue;
-        }
-    }
-
-    editor.cursor.moveTo(@min(saved_pos, editor.buffer.total_len));
-    editor.ensureCursorVisible();
-    editor.modified = true;
-    editor.markAllDirty();
-    editor.highlighter.parse(&editor.buffer);
-}
-
 // ── Apply rename edits from LSP ──────────────────────────────────
 
 fn applyRenameEdits(
@@ -2193,323 +1972,14 @@ fn applyRenameEdits(
 
         if (is_current) {
             // Apply edits to current buffer (back-to-front)
-            applyCodeActionEdits(editor, re.edits.items);
+            lsp_ops.applyCodeActionEdits(editor, re.edits.items);
         } else {
             // Open the file in a new tab and apply edits
             openFileInTab(tab_mgr, allocator, path, lsp_client, font, git_info);
             syncPaneToActiveTab(pane_mgr, tab_mgr);
             const target = tab_mgr.activeView();
-            applyCodeActionEdits(target, re.edits.items);
+            lsp_ops.applyCodeActionEdits(target, re.edits.items);
         }
     }
     editor.markAllDirty();
-}
-
-fn applyCodeActionEdits(editor: *EditorView, items: []const lsp.FormattingEdit) void {
-    if (items.len == 0) return;
-
-    // Sort indices descending by position (back-to-front)
-    const sorted = editor.allocator.alloc(usize, items.len) catch return;
-    defer editor.allocator.free(sorted);
-    for (sorted, 0..) |*s, i| s.* = i;
-
-    // Insertion sort descending by position
-    var sort_i: usize = 1;
-    while (sort_i < sorted.len) : (sort_i += 1) {
-        var j = sort_i;
-        while (j > 0) {
-            const a = items[sorted[j]];
-            const b = items[sorted[j - 1]];
-            if (a.start_line > b.start_line or (a.start_line == b.start_line and a.start_col > b.start_col)) {
-                const tmp = sorted[j];
-                sorted[j] = sorted[j - 1];
-                sorted[j - 1] = tmp;
-                j -= 1;
-            } else break;
-        }
-    }
-
-    const saved_pos = editor.cursor.primary().head;
-
-    for (sorted) |idx| {
-        const edit = items[idx];
-        const start_off = editor.buffer.lineToOffset(edit.start_line) + edit.start_col;
-        const end_off = editor.buffer.lineToOffset(edit.end_line) + edit.end_col;
-        const del_len = if (end_off > start_off) end_off - start_off else 0;
-
-        if (del_len > 0) {
-            editor.buffer.delete(start_off, del_len) catch continue;
-        }
-        if (edit.new_text.len > 0) {
-            editor.buffer.insert(start_off, edit.new_text) catch continue;
-        }
-    }
-
-    editor.cursor.moveTo(@min(saved_pos, editor.buffer.total_len));
-    editor.ensureCursorVisible();
-    editor.modified = true;
-    editor.markAllDirty();
-    editor.highlighter.parse(&editor.buffer);
-}
-
-fn populateReferencesDisplay(lsp_client: *lsp.LspClient, filtered_display: *std.ArrayList([]const u8), allocator: std.mem.Allocator) void {
-    filtered_display.clearRetainingCapacity();
-    for (lsp_client.references.items) |ref| {
-        const path = lsp.uriToPath(ref.uri) orelse ref.uri;
-        // Format as "path:line"
-        var buf: [512]u8 = undefined;
-        const display = std.fmt.bufPrint(&buf, "{s}:{d}", .{ path, ref.line + 1 }) catch continue;
-        const owned = allocator.dupe(u8, display) catch continue;
-        filtered_display.append(allocator, owned) catch {
-            allocator.free(owned);
-            continue;
-        };
-    }
-}
-
-fn freeRefDisplay(filtered_display: *std.ArrayList([]const u8), allocator: std.mem.Allocator) void {
-    for (filtered_display.items) |item| {
-        allocator.free(item);
-    }
-    filtered_display.clearRetainingCapacity();
-}
-
-// ── Completion popup rendering ──────────────────────────────────
-
-fn renderCompletionPopup(
-    renderer: *Renderer,
-    font: *FontFace,
-    items: []const lsp.CompletionItem,
-    selected: usize,
-    editor: *const EditorView,
-) void {
-    const cell_w = font.cell_width;
-    const cell_h = font.cell_height;
-    if (cell_w == 0 or cell_h == 0 or items.len == 0) return;
-
-    const lc = editor.buffer.offsetToLineCol(editor.cursor.primary().head);
-    if (lc.line < editor.scroll_line) return;
-    const screen_row = lc.line - editor.scroll_line;
-    const vcol = editor.visualColAtOffset(lc.line, lc.col);
-    const gw = editor.gutterWidth(font);
-    const popup_x = editor.x_offset + gw + editor.left_pad + vcol * cell_w;
-    const popup_y = editor.y_offset + (screen_row + 1) * cell_h;
-
-    const max_items: u32 = @min(@as(u32, @intCast(items.len)), 10);
-    const popup_w: u32 = 35 * cell_w;
-    const popup_h: u32 = max_items * cell_h;
-
-    const bg = render_mod.Color.fromHex(0x1e1e2e);
-    const sel_bg = render_mod.Color.fromHex(0x45475a);
-    const border = render_mod.Color.fromHex(0x585b70);
-    const text_color = render_mod.Color.fromHex(0xcdd6f4);
-    const detail_color = render_mod.Color.fromHex(0x6c7086);
-
-    renderer.fillRect(popup_x -| 1, popup_y -| 1, popup_w + 2, popup_h + 2, border);
-    renderer.fillRect(popup_x, popup_y, popup_w, popup_h, bg);
-
-    var row: u32 = 0;
-    for (items[0..max_items], 0..) |item, i| {
-        const ry = popup_y + row * cell_h;
-        const rbg = if (i == selected) sel_bg else bg;
-        renderer.fillRect(popup_x, ry, popup_w, cell_h, rbg);
-
-        var tx = popup_x + 4;
-        for (item.label) |ch| {
-            if (tx + cell_w > popup_x + popup_w) break;
-            const glyph = font.getGlyph(ch) catch continue;
-            const gx = @as(i32, @intCast(tx)) + glyph.bearing_x;
-            const gy = @as(i32, @intCast(ry)) + font.ascent - glyph.bearing_y;
-            renderer.drawGlyph(glyph, gx, gy, text_color);
-            tx += cell_w;
-        }
-
-        if (item.detail) |detail| {
-            tx += cell_w;
-            for (detail) |ch| {
-                if (tx + cell_w > popup_x + popup_w) break;
-                const glyph = font.getGlyph(ch) catch continue;
-                const gx = @as(i32, @intCast(tx)) + glyph.bearing_x;
-                const gy = @as(i32, @intCast(ry)) + font.ascent - glyph.bearing_y;
-                renderer.drawGlyph(glyph, gx, gy, detail_color);
-                tx += cell_w;
-            }
-        }
-
-        row += 1;
-    }
-}
-
-// ── Hover tooltip rendering ─────────────────────────────────────
-
-fn renderHoverTooltip(
-    renderer: *Renderer,
-    font: *FontFace,
-    text: []const u8,
-    editor: *const EditorView,
-) void {
-    const cell_w = font.cell_width;
-    const cell_h = font.cell_height;
-    if (cell_w == 0 or cell_h == 0 or text.len == 0) return;
-
-    const lc = editor.buffer.offsetToLineCol(editor.cursor.primary().head);
-    if (lc.line < editor.scroll_line) return;
-    const screen_row = lc.line - editor.scroll_line;
-    const vcol = editor.visualColAtOffset(lc.line, lc.col);
-    const gw = editor.gutterWidth(font);
-    const tip_x = editor.x_offset + gw + editor.left_pad + vcol * cell_w;
-
-    var line_count: u32 = 1;
-    var max_line_len: u32 = 0;
-    var cur_len: u32 = 0;
-    for (text) |ch| {
-        if (ch == '\n') {
-            line_count += 1;
-            if (cur_len > max_line_len) max_line_len = cur_len;
-            cur_len = 0;
-        } else {
-            cur_len += 1;
-        }
-    }
-    if (cur_len > max_line_len) max_line_len = cur_len;
-
-    const tip_w = @min((max_line_len + 2) * cell_w, renderer.width * 7 / 10);
-    const visible_lines = @min(line_count, 8);
-    const tip_h = visible_lines * cell_h + 4;
-    const tip_y = if (screen_row > 0 and editor.y_offset + (screen_row) * cell_h > tip_h)
-        editor.y_offset + screen_row * cell_h - tip_h
-    else
-        editor.y_offset + (screen_row + 1) * cell_h;
-
-    const bg = render_mod.Color.fromHex(0x1e1e2e);
-    const border = render_mod.Color.fromHex(0x585b70);
-    const text_color = render_mod.Color.fromHex(0xcdd6f4);
-
-    renderer.fillRect(tip_x -| 1, tip_y -| 1, tip_w + 2, tip_h + 2, border);
-    renderer.fillRect(tip_x, tip_y, tip_w, tip_h, bg);
-
-    var ly: u32 = tip_y + 2;
-    var lx: u32 = tip_x + cell_w / 2;
-    var lines_drawn: u32 = 0;
-    for (text) |ch| {
-        if (lines_drawn >= visible_lines) break;
-        if (ch == '\n') {
-            ly += cell_h;
-            lx = tip_x + cell_w / 2;
-            lines_drawn += 1;
-            continue;
-        }
-        if (lx + cell_w > tip_x + tip_w) continue;
-        const glyph = font.getGlyph(ch) catch continue;
-        const gx = @as(i32, @intCast(lx)) + glyph.bearing_x;
-        const gy = @as(i32, @intCast(ly)) + font.ascent - glyph.bearing_y;
-        renderer.drawGlyph(glyph, gx, gy, text_color);
-        lx += cell_w;
-    }
-}
-
-// ── Signature help rendering ────────────────────────────────────
-
-fn renderSignatureHelp(
-    renderer: *Renderer,
-    font: *FontFace,
-    sig: lsp.SignatureInfo,
-    editor: *const EditorView,
-) void {
-    const cell_w = font.cell_width;
-    const cell_h = font.cell_height;
-    if (cell_w == 0 or cell_h == 0 or sig.label.len == 0) return;
-
-    const lc = editor.buffer.offsetToLineCol(editor.cursor.primary().head);
-    if (lc.line < editor.scroll_line) return;
-    const screen_row = lc.line - editor.scroll_line;
-    const vcol = editor.visualColAtOffset(lc.line, lc.col);
-    const gw = editor.gutterWidth(font);
-    const popup_x = editor.x_offset + gw + editor.left_pad + vcol * cell_w;
-    const popup_w = @as(u32, @intCast(sig.label.len)) * cell_w + 16;
-    const popup_h = cell_h + 8;
-
-    // Position above cursor if possible, else below
-    const popup_y = if (screen_row > 0 and editor.y_offset + screen_row * cell_h > popup_h + 4)
-        editor.y_offset + screen_row * cell_h - popup_h - 4
-    else
-        editor.y_offset + (screen_row + 1) * cell_h;
-
-    const bg = render_mod.Color.fromHex(0x313244);
-    const border = render_mod.Color.fromHex(0x585b70);
-    const text_color = render_mod.Color.fromHex(0xcdd6f4);
-    const highlight_color = render_mod.Color.fromHex(0xf9e2af); // Yellow for active param
-
-    renderer.fillRect(popup_x -| 1, popup_y -| 1, popup_w + 2, popup_h + 2, border);
-    renderer.fillRect(popup_x, popup_y, popup_w, popup_h, bg);
-
-    // Render signature text with highlighted active parameter
-    var x = popup_x + 8;
-    const y = popup_y + 4;
-
-    for (sig.label, 0..) |ch, i| {
-        const color = if (sig.param_offsets) |offsets|
-            (if (i >= offsets.start and i < offsets.end) highlight_color else text_color)
-        else
-            text_color;
-
-        const glyph = font.getGlyph(ch) catch continue;
-        const gx: i32 = @intCast(x);
-        const gy: i32 = @as(i32, @intCast(y)) + font.ascent - glyph.bearing_y;
-        renderer.drawGlyph(glyph, gx, gy, color);
-        x += cell_w;
-    }
-}
-
-// ── Go to Symbol helpers ──────────────────────────────────────────
-
-fn symbolKindPrefix(kind: u8) []const u8 {
-    return switch (kind) {
-        1 => "file ",
-        2 => "mod  ",
-        5 => "class",
-        6 => "meth ",
-        12 => "fn   ",
-        13 => "var  ",
-        14 => "const",
-        23 => "strct",
-        26 => "type ",
-        else => "     ",
-    };
-}
-
-fn populateSymbolDisplay(
-    lsp_client: *lsp.LspClient,
-    filtered_display: *std.ArrayList([]const u8),
-    allocator: std.mem.Allocator,
-    query: []const u8,
-) void {
-    filtered_display.clearRetainingCapacity();
-    // Free any previously allocated display strings
-    // (We reuse a static buffer approach: format into allocated strings)
-    for (lsp_client.document_symbols.items) |sym| {
-        // Build display string: "prefix name"
-        const prefix = symbolKindPrefix(sym.kind);
-        const display = std.fmt.allocPrint(allocator, "{s} {s}", .{ prefix, sym.name }) catch continue;
-        // Filter by query if non-empty
-        if (query.len > 0) {
-            if (!containsIgnoreCase(sym.name, query)) {
-                allocator.free(display);
-                continue;
-            }
-        }
-        filtered_display.append(allocator, display) catch {
-            allocator.free(display);
-            continue;
-        };
-    }
-}
-
-fn freeSymbolDisplay(filtered_display: *std.ArrayList([]const u8), allocator: std.mem.Allocator) void {
-    for (filtered_display.items) |item| {
-        // Only free items that were allocated (symbol display strings)
-        // They all start with a kind prefix, so they're all heap-allocated
-        allocator.free(item);
-    }
-    filtered_display.clearRetainingCapacity();
 }
