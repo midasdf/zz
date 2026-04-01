@@ -51,6 +51,14 @@ pub const RenameEdit = struct {
     edits: std.ArrayList(FormattingEdit),
 };
 
+pub const SignatureInfo = struct {
+    label: []u8, // Owned - full signature label
+    active_param: u32, // Which parameter is active
+    param_offsets: ?ParamRange = null, // Byte offsets of active param in label
+
+    pub const ParamRange = struct { start: u32, end: u32 };
+};
+
 pub const ServerCapabilities = struct {
     has_completion: bool = false,
     has_definition: bool = false,
@@ -60,6 +68,7 @@ pub const ServerCapabilities = struct {
     has_rename: bool = false,
     has_code_action: bool = false,
     has_references: bool = false,
+    has_signature_help: bool = false,
 };
 
 // ── LSP Client ──────────────────────────────────────────────────────
@@ -117,6 +126,10 @@ pub const LspClient = struct {
     references: std.ArrayList(Location),
     has_references: bool,
 
+    // Pending signature help response
+    signature: ?SignatureInfo,
+    has_signature: bool,
+
     // Track pending request IDs
     pending_completion_id: ?u32,
     pending_definition_id: ?u32,
@@ -126,6 +139,7 @@ pub const LspClient = struct {
     pending_rename_id: ?u32,
     pending_code_action_id: ?u32,
     pending_references_id: ?u32,
+    pending_signature_id: ?u32,
 
     pub fn init(allocator: std.mem.Allocator) LspClient {
         return .{
@@ -151,6 +165,8 @@ pub const LspClient = struct {
             .has_code_actions = false,
             .references = .{},
             .has_references = false,
+            .signature = null,
+            .has_signature = false,
             .read_buf = undefined,
             .read_pos = 0,
             .msg_buf = .{},
@@ -164,6 +180,7 @@ pub const LspClient = struct {
             .pending_rename_id = null,
             .pending_code_action_id = null,
             .pending_references_id = null,
+            .pending_signature_id = null,
         };
     }
 
@@ -242,6 +259,7 @@ pub const LspClient = struct {
         self.code_actions.deinit(self.allocator);
         self.freeReferences();
         self.references.deinit(self.allocator);
+        self.freeSignature();
         self.msg_buf.deinit(self.allocator);
     }
 
@@ -370,6 +388,15 @@ pub const LspClient = struct {
         , .{ uri, line, col }) catch return;
         self.pending_references_id = self.next_id;
         self.sendRequest("textDocument/references", params);
+    }
+
+    pub fn requestSignatureHelp(self: *LspClient, uri: []const u8, line: u32, col: u32) void {
+        var params_buf: [1024]u8 = undefined;
+        const params = std.fmt.bufPrint(&params_buf,
+            \\{{"textDocument":{{"uri":"{s}"}},"position":{{"line":{d},"character":{d}}}}}
+        , .{ uri, line, col }) catch return;
+        self.pending_signature_id = self.next_id;
+        self.sendRequest("textDocument/signatureHelp", params);
     }
 
     // ── Message Processing ──────────────────────────────────────────
@@ -603,6 +630,14 @@ pub const LspClient = struct {
                 return;
             }
         }
+
+        if (self.pending_signature_id) |sid| {
+            if (id == sid) {
+                self.pending_signature_id = null;
+                self.handleSignatureHelpResponse(result);
+                return;
+            }
+        }
     }
 
     fn parseServerCapabilities(self: *LspClient, result: std.json.Value) void {
@@ -661,6 +696,9 @@ pub const LspClient = struct {
                 .bool => |b| b,
                 else => true,
             };
+        }
+        if (caps.get("signatureHelpProvider")) |_| {
+            self.server_capabilities.has_signature_help = true;
         }
     }
 
@@ -1404,6 +1442,111 @@ pub const LspClient = struct {
             if (item.detail) |d| self.allocator.free(d);
         }
         self.completion_items.clearRetainingCapacity();
+    }
+
+    fn handleSignatureHelpResponse(self: *LspClient, result: std.json.Value) void {
+        self.freeSignature();
+        self.has_signature = true;
+
+        const obj = switch (result) {
+            .object => |o| o,
+            .null => return,
+            else => return,
+        };
+
+        const sigs_val = obj.get("signatures") orelse return;
+        const sigs = switch (sigs_val) {
+            .array => |a| a,
+            else => return,
+        };
+
+        if (sigs.items.len == 0) return;
+
+        // Use activeSignature if present, default to 0
+        const active_sig_idx: usize = blk: {
+            const v = jsonGetU32(obj, "activeSignature") orelse break :blk 0;
+            break :blk @min(@as(usize, v), sigs.items.len - 1);
+        };
+
+        const sig_obj = switch (sigs.items[active_sig_idx]) {
+            .object => |o| o,
+            else => return,
+        };
+
+        const label_str = blk: {
+            const v = sig_obj.get("label") orelse return;
+            break :blk switch (v) {
+                .string => |s| s,
+                else => return,
+            };
+        };
+
+        // Get active parameter: use response-level activeParameter, fallback to signature-level
+        const active_param = jsonGetU32(obj, "activeParameter") orelse
+            jsonGetU32(sig_obj, "activeParameter") orelse 0;
+
+        // Try to find parameter label offsets for highlighting
+        var param_offsets: ?SignatureInfo.ParamRange = null;
+        if (sig_obj.get("parameters")) |params_val| {
+            const params = switch (params_val) {
+                .array => |a| a,
+                else => null,
+            };
+            if (params) |p| {
+                if (active_param < p.items.len) {
+                    const param_obj = switch (p.items[active_param]) {
+                        .object => |o| o,
+                        else => null,
+                    };
+                    if (param_obj) |po| {
+                        if (po.get("label")) |plabel| {
+                            switch (plabel) {
+                                .array => |arr| {
+                                    // [start, end] offsets
+                                    if (arr.items.len >= 2) {
+                                        const s = switch (arr.items[0]) {
+                                            .integer => |i| if (i >= 0) @as(u32, @intCast(@as(u64, @bitCast(i)))) else null,
+                                            else => null,
+                                        };
+                                        const e = switch (arr.items[1]) {
+                                            .integer => |i| if (i >= 0) @as(u32, @intCast(@as(u64, @bitCast(i)))) else null,
+                                            else => null,
+                                        };
+                                        if (s != null and e != null) {
+                                            param_offsets = .{ .start = s.?, .end = e.? };
+                                        }
+                                    }
+                                },
+                                .string => |ps| {
+                                    // String label: find it in the signature label
+                                    if (std.mem.indexOf(u8, label_str, ps)) |idx| {
+                                        param_offsets = .{
+                                            .start = @intCast(idx),
+                                            .end = @intCast(idx + ps.len),
+                                        };
+                                    }
+                                },
+                                else => {},
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        const owned_label = self.allocator.dupe(u8, label_str) catch return;
+        self.signature = .{
+            .label = owned_label,
+            .active_param = active_param,
+            .param_offsets = param_offsets,
+        };
+    }
+
+    fn freeSignature(self: *LspClient) void {
+        if (self.signature) |sig| {
+            self.allocator.free(sig.label);
+            self.signature = null;
+        }
     }
 
     fn freeFormattingEdits(self: *LspClient) void {

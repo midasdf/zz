@@ -2578,6 +2578,249 @@ pub const EditorView = struct {
             self.markAllDirty();
         }
     }
+
+    // ── Smart selection expand/shrink ──────────────────────────────
+
+    pub fn expandSelection(self: *EditorView) void {
+        const sel = self.cursor.primary();
+
+        if (!sel.hasSelection()) {
+            // First expand: select current word
+            self.selectWordAtCursor();
+            return;
+        }
+
+        // Already has selection: try expanding to enclosing brackets/braces
+        const start = sel.start();
+        const end_pos = sel.end();
+
+        // Search backward for opening bracket
+        var s: u32 = if (start > 0) start - 1 else start;
+        var depth: i32 = 0;
+        var found_open = false;
+        while (true) {
+            const slice = self.buffer.contiguousSliceAt(s);
+            if (slice.len == 0) break;
+            const ch = slice[0];
+            if (ch == ')' or ch == ']' or ch == '}') {
+                depth += 1;
+            } else if (ch == '(' or ch == '[' or ch == '{') {
+                if (depth == 0) {
+                    found_open = true;
+                    break;
+                }
+                depth -= 1;
+            }
+            if (s == 0) break;
+            s -= 1;
+        }
+
+        if (!found_open) {
+            // No enclosing bracket found: expand to full line, then full buffer
+            const start_lc = self.buffer.offsetToLineCol(start);
+            const end_lc = self.buffer.offsetToLineCol(end_pos);
+            const line_start = self.buffer.lineToOffset(start_lc.line);
+            const next_after_end = if (end_lc.line + 1 < self.buffer.lineCount())
+                self.buffer.lineToOffset(end_lc.line + 1)
+            else
+                self.buffer.total_len;
+
+            if (line_start < start or next_after_end > end_pos) {
+                // Expand to full lines
+                self.cursor.cursors.items[0] = .{ .anchor = line_start, .head = next_after_end };
+            } else {
+                // Already full lines: expand to whole buffer
+                self.cursor.cursors.items[0] = .{ .anchor = 0, .head = self.buffer.total_len };
+            }
+            self.markAllDirty();
+            return;
+        }
+
+        // Find matching close bracket
+        const open_ch = self.buffer.contiguousSliceAt(s)[0];
+        const close_ch: u8 = switch (open_ch) {
+            '(' => ')',
+            '[' => ']',
+            '{' => '}',
+            else => return,
+        };
+
+        var e: u32 = end_pos;
+        depth = 0;
+        var found_close = false;
+        while (e < self.buffer.total_len) {
+            const slice = self.buffer.contiguousSliceAt(e);
+            if (slice.len == 0) break;
+            const ch = slice[0];
+            if (ch == open_ch) {
+                depth += 1;
+            } else if (ch == close_ch) {
+                if (depth == 0) {
+                    e += 1; // include the closing bracket
+                    found_close = true;
+                    break;
+                }
+                depth -= 1;
+            }
+            e += 1;
+        }
+
+        if (found_close and (s < start or e > end_pos)) {
+            self.cursor.cursors.items[0] = .{ .anchor = s, .head = e };
+            self.ensureCursorVisible();
+            self.markAllDirty();
+        }
+    }
+
+    pub fn shrinkSelection(self: *EditorView) void {
+        const sel = self.cursor.primary();
+        if (sel.hasSelection()) {
+            // Shrink: try to find inner brackets within current selection
+            const start = sel.start();
+            const end_pos = sel.end();
+
+            // Look for the first opening bracket after start
+            var inner_start: ?u32 = null;
+            var s = start;
+            while (s < end_pos) {
+                const slice = self.buffer.contiguousSliceAt(s);
+                if (slice.len == 0) break;
+                const ch = slice[0];
+                if (ch == '(' or ch == '[' or ch == '{') {
+                    inner_start = s;
+                    break;
+                }
+                s += 1;
+            }
+
+            if (inner_start) |is| {
+                // Find matching close bracket
+                const open_ch = self.buffer.contiguousSliceAt(is)[0];
+                const close_ch: u8 = switch (open_ch) {
+                    '(' => ')',
+                    '[' => ']',
+                    '{' => '}',
+                    else => {
+                        self.cursor.cursors.items[0] = .{ .anchor = sel.head, .head = sel.head };
+                        self.markAllDirty();
+                        return;
+                    },
+                };
+
+                var e = is + 1;
+                var depth: i32 = 0;
+                while (e < end_pos) {
+                    const slice = self.buffer.contiguousSliceAt(e);
+                    if (slice.len == 0) break;
+                    const ch = slice[0];
+                    if (ch == open_ch) {
+                        depth += 1;
+                    } else if (ch == close_ch) {
+                        if (depth == 0) {
+                            // Found matching pair within selection
+                            self.cursor.cursors.items[0] = .{ .anchor = is, .head = e + 1 };
+                            self.ensureCursorVisible();
+                            self.markAllDirty();
+                            return;
+                        }
+                        depth -= 1;
+                    }
+                    e += 1;
+                }
+            }
+
+            // No inner brackets: collapse to cursor position
+            self.cursor.cursors.items[0] = .{ .anchor = sel.head, .head = sel.head };
+            self.markAllDirty();
+        }
+    }
+
+    // ── Sort selected lines ───────────────────────────────────────
+
+    pub fn sortSelectedLines(self: *EditorView, descending: bool) !void {
+        const sel = self.cursor.primary();
+        const start_off = if (sel.hasSelection()) sel.start() else sel.head;
+        const end_off = if (sel.hasSelection()) sel.end() else sel.head;
+        const start_lc = self.buffer.offsetToLineCol(start_off);
+        const end_raw = self.buffer.offsetToLineCol(if (end_off > 0) end_off -| 1 else 0);
+        const end_lc_line = if (sel.hasSelection() and end_off > start_off) end_raw.line else start_lc.line;
+
+        if (start_lc.line == end_lc_line) return; // Need at least 2 lines
+
+        // Collect line contents
+        const line_count = end_lc_line - start_lc.line + 1;
+        var lines_list = try self.allocator.alloc([]const u8, line_count);
+        defer self.allocator.free(lines_list);
+
+        var line_copies = try self.allocator.alloc([]u8, line_count);
+        defer {
+            for (line_copies[0..line_count]) |lc| {
+                self.allocator.free(lc);
+            }
+            self.allocator.free(line_copies);
+        }
+
+        var line: u32 = start_lc.line;
+        var idx: usize = 0;
+        while (line <= end_lc_line) : ({ line += 1; idx += 1; }) {
+            const ls = self.buffer.lineToOffset(line);
+            const le = if (line + 1 < self.buffer.lineCount()) self.buffer.lineToOffset(line + 1) else self.buffer.total_len;
+            // Collect line content byte by byte from piece table
+            const line_len = le - ls;
+            const copy = try self.allocator.alloc(u8, line_len);
+            var ci: u32 = 0;
+            while (ci < line_len) {
+                const slice = self.buffer.contiguousSliceAt(ls + ci);
+                if (slice.len == 0) break;
+                const to_copy = @min(slice.len, line_len - ci);
+                @memcpy(copy[ci..][0..to_copy], slice[0..to_copy]);
+                ci += to_copy;
+            }
+            line_copies[idx] = copy;
+            lines_list[idx] = copy[0..line_len];
+        }
+
+        // Sort
+        if (descending) {
+            std.mem.sort([]const u8, lines_list, {}, struct {
+                fn cmp(_: void, a: []const u8, b: []const u8) bool {
+                    return std.mem.order(u8, a, b) == .gt;
+                }
+            }.cmp);
+        } else {
+            std.mem.sort([]const u8, lines_list, {}, struct {
+                fn cmp(_: void, a: []const u8, b: []const u8) bool {
+                    return std.mem.order(u8, a, b) == .lt;
+                }
+            }.cmp);
+        }
+
+        // Build sorted text
+        var total_len: usize = 0;
+        for (lines_list) |ln| total_len += ln.len;
+
+        var sorted = try self.allocator.alloc(u8, total_len);
+        defer self.allocator.free(sorted);
+        var pos: usize = 0;
+        for (lines_list) |ln| {
+            @memcpy(sorted[pos..][0..ln.len], ln);
+            pos += ln.len;
+        }
+
+        // Replace the range in buffer
+        const range_start = self.buffer.lineToOffset(start_lc.line);
+        const range_end = if (end_lc_line + 1 < self.buffer.lineCount())
+            self.buffer.lineToOffset(end_lc_line + 1)
+        else
+            self.buffer.total_len;
+
+        const del_len = range_end - range_start;
+        try self.buffer.delete(range_start, del_len);
+        try self.buffer.insert(range_start, sorted);
+
+        self.modified = true;
+        self.markAllDirty();
+    }
 };
 
 // ── Tab bar rendering ─────────────────────────────────────────────

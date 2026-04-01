@@ -42,6 +42,8 @@ const command_list = [_][]const u8{
     "Edit: Copy",
     "Edit: Cut",
     "Edit: Paste",
+    "Edit: Sort Lines (Ascending)",
+    "Edit: Sort Lines (Descending)",
     "View: Go to Line",
     "View: Find",
     "Editor: Close",
@@ -164,6 +166,9 @@ pub fn main() !void {
     // Hover tooltip state
     var hover_active = false;
 
+    // Signature help state
+    var signature_active = false;
+
     // Format-on-save: when true, auto-save after formatting edits arrive
     var format_then_save = false;
 
@@ -210,7 +215,7 @@ pub fn main() !void {
         const editor = tab_mgr.activeView();
         editor.lsp_diagnostics = lsp_client.diagnostics.items;
         file_tree.active_path = if (editor.file_path) |p| p else null;
-        renderFrame(&tab_mgr, &pane_mgr, &win, &font, &overlay, &file_tree, &terminal, &lsp_client, completion_active, completion_selected, hover_active);
+        renderFrame(&tab_mgr, &pane_mgr, &win, &font, &overlay, &file_tree, &terminal, &lsp_client, completion_active, completion_selected, hover_active, signature_active);
     }
 
     while (running) {
@@ -231,6 +236,14 @@ pub fn main() !void {
                                     hover_active = false;
                                     editor.markAllDirty();
                                     // Fall through to process the key normally below
+                                }
+                                if (signature_active) {
+                                    // Escape or ')' dismisses signature help
+                                    if (ke.keysym == window_mod.XK_Escape) {
+                                        signature_active = false;
+                                        editor.markAllDirty();
+                                        continue;
+                                    }
                                 }
                                 if (completion_active) {
                                     if (ke.keysym == window_mod.XK_Escape) {
@@ -439,6 +452,19 @@ pub fn main() !void {
                                             lsp_client.requestCompletion(uri2, lc2.line, lc2.col);
                                         }
                                     }
+                                    // Auto-trigger signature help after ( and ,
+                                    if (text.len == 1 and (text[0] == '(' or text[0] == ',')) {
+                                        if (editor.file_path) |path| {
+                                            var sh_buf: [4096]u8 = undefined;
+                                            const sh_uri = lsp.formatUri(path, &sh_buf);
+                                            const sh_lc = editor.buffer.offsetToLineCol(editor.cursor.primary().head);
+                                            lsp_client.requestSignatureHelp(sh_uri, sh_lc.line, sh_lc.col);
+                                        }
+                                    }
+                                    // Dismiss signature help on )
+                                    if (text.len == 1 and text[0] == ')') {
+                                        signature_active = false;
+                                    }
                                 }
                             },
 
@@ -615,6 +641,16 @@ pub fn main() !void {
                         }
                     }
 
+                    // Handle signature help response
+                    if (lsp_client.has_signature) {
+                        lsp_client.has_signature = false;
+                        if (lsp_client.signature != null) {
+                            signature_active = true;
+                        } else {
+                            signature_active = false;
+                        }
+                    }
+
                     // Handle formatting response
                     if (lsp_client.has_formatting) {
                         lsp_client.has_formatting = false;
@@ -715,7 +751,7 @@ pub fn main() !void {
         {
             const editor = pane_mgr.active_leaf;
             editor.lsp_diagnostics = lsp_client.diagnostics.items;
-            renderFrame(&tab_mgr, &pane_mgr, &win, &font, &overlay, &file_tree, &terminal, &lsp_client, completion_active, completion_selected, hover_active);
+            renderFrame(&tab_mgr, &pane_mgr, &win, &font, &overlay, &file_tree, &terminal, &lsp_client, completion_active, completion_selected, hover_active, signature_active);
         }
     }
 }
@@ -1050,6 +1086,13 @@ fn handleAction(editor: *EditorView, win: *Window, action: keymap.Action, lsp_cl
         .goto_matching_bracket => {
             editor.gotoMatchingBracket();
         },
+        .expand_selection => {
+            editor.expandSelection();
+        },
+        .shrink_selection => {
+            editor.shrinkSelection();
+        },
+        .sort_lines_asc, .sort_lines_desc => {},
         .switch_theme => {
             view_mod.cycleTheme();
             editor.markAllDirty();
@@ -1221,6 +1264,7 @@ fn renderFrame(
     comp_active: bool,
     comp_selected: usize,
     show_hover: bool,
+    show_signature: bool,
 ) void {
     var renderer = Renderer{
         .buffer = win.getBuffer(),
@@ -1282,6 +1326,14 @@ fn renderFrame(
         if (lsp_client.hover_text) |hover_text| {
             const active_ed = pane_mgr.active_leaf;
             renderHoverTooltip(&renderer, font, hover_text, active_ed);
+        }
+    }
+
+    // Signature help tooltip
+    if (show_signature) {
+        if (lsp_client.signature) |sig| {
+            const active_ed = pane_mgr.active_leaf;
+            renderSignatureHelp(&renderer, font, sig, active_ed);
         }
     }
 
@@ -2005,6 +2057,10 @@ fn executeCommand(cmd_name: []const u8, editor: *EditorView) void {
     } else if (std.mem.eql(u8, cmd_name, "Theme: Cycle Next")) {
         view_mod.cycleTheme();
         editor.markAllDirty();
+    } else if (std.mem.eql(u8, cmd_name, "Edit: Sort Lines (Ascending)")) {
+        editor.sortSelectedLines(false) catch {};
+    } else if (std.mem.eql(u8, cmd_name, "Edit: Sort Lines (Descending)")) {
+        editor.sortSelectedLines(true) catch {};
     }
     // Other commands (Copy, Cut, Paste, Open, Find, Go to Line) require
     // additional context (window for clipboard, overlay for sub-modes).
@@ -2322,6 +2378,59 @@ fn renderHoverTooltip(
         const gy = @as(i32, @intCast(ly)) + font.ascent - glyph.bearing_y;
         renderer.drawGlyph(glyph, gx, gy, text_color);
         lx += cell_w;
+    }
+}
+
+// ── Signature help rendering ────────────────────────────────────
+
+fn renderSignatureHelp(
+    renderer: *Renderer,
+    font: *FontFace,
+    sig: lsp.SignatureInfo,
+    editor: *const EditorView,
+) void {
+    const cell_w = font.cell_width;
+    const cell_h = font.cell_height;
+    if (cell_w == 0 or cell_h == 0 or sig.label.len == 0) return;
+
+    const lc = editor.buffer.offsetToLineCol(editor.cursor.primary().head);
+    if (lc.line < editor.scroll_line) return;
+    const screen_row = lc.line - editor.scroll_line;
+    const vcol = editor.visualColAtOffset(lc.line, lc.col);
+    const gw = editor.gutterWidth(font);
+    const popup_x = editor.x_offset + gw + editor.left_pad + vcol * cell_w;
+    const popup_w = @as(u32, @intCast(sig.label.len)) * cell_w + 16;
+    const popup_h = cell_h + 8;
+
+    // Position above cursor if possible, else below
+    const popup_y = if (screen_row > 0 and editor.y_offset + screen_row * cell_h > popup_h + 4)
+        editor.y_offset + screen_row * cell_h - popup_h - 4
+    else
+        editor.y_offset + (screen_row + 1) * cell_h;
+
+    const bg = render_mod.Color.fromHex(0x313244);
+    const border = render_mod.Color.fromHex(0x585b70);
+    const text_color = render_mod.Color.fromHex(0xcdd6f4);
+    const highlight_color = render_mod.Color.fromHex(0xf9e2af); // Yellow for active param
+
+    renderer.fillRect(popup_x -| 1, popup_y -| 1, popup_w + 2, popup_h + 2, border);
+    renderer.fillRect(popup_x, popup_y, popup_w, popup_h, bg);
+
+    // Render signature text with highlighted active parameter
+    var x = popup_x + 8;
+    const y = popup_y + 4;
+
+    for (sig.label, 0..) |ch, i| {
+        const color = if (sig.param_offsets) |offsets|
+            (if (i >= offsets.start and i < offsets.end) highlight_color else text_color)
+        else
+            text_color;
+
+        const glyph = font.getGlyph(ch) catch continue;
+        const gx: i32 = @intCast(x);
+        const gy: i32 = @as(i32, @intCast(y)) + font.ascent - glyph.bearing_y;
+        renderer.drawGlyph(glyph, gx, gy, color);
+        x += cell_w;
     }
 }
 

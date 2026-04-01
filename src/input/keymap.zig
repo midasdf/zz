@@ -114,6 +114,12 @@ pub const Action = enum {
     scroll_down,
     // Bracket matching
     goto_matching_bracket,
+    // Smart selection expand/shrink
+    expand_selection,
+    shrink_selection,
+    // Sort lines
+    sort_lines_asc,
+    sort_lines_desc,
 };
 
 pub fn modFromWindow(mods: Window.Modifiers) Modifier {
@@ -174,6 +180,9 @@ pub fn mapKey(keysym: u32, mods: Modifier) ?Action {
         };
     }
     if (mods == .ctrl_shift) {
+        // Ctrl+Shift+Up/Down -> expand/shrink selection
+        if (keysym == Window.XK_Up) return .expand_selection;
+        if (keysym == Window.XK_Down) return .shrink_selection;
         // Ctrl+Shift+Enter -> insert line above
         if (keysym == Window.XK_Return) return .insert_line_above;
         // Ctrl+Shift+Tab -> prev tab (XK_ISO_Left_Tab = 0xFE20)
