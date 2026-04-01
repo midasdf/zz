@@ -72,7 +72,12 @@ const font_path = "/usr/share/fonts/PlemolJP/PlemolJPConsoleNF-Regular.ttf";
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
+    defer {
+        if (gpa.deinit() == .leak) {
+            const msg = "zz: memory leak detected\n";
+            _ = std.posix.write(std.posix.STDERR_FILENO, msg) catch 0;
+        }
+    }
     const allocator = gpa.allocator();
 
     // Parse CLI args

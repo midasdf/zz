@@ -1,17 +1,27 @@
 const std = @import("std");
 
+/// Append-only text buffer using the Piece Table data structure.
+/// Supports O(1) insert, O(log n) line lookup, and undo/redo with coalescing.
 pub const PieceTable = struct {
+    /// Immutable original file content.
     original: []const u8,
-    owned_original: ?[]u8 = null, // Non-null if we allocated original (for file reopen)
+    /// Heap-allocated copy of original content (non-null when file is reopened).
+    owned_original: ?[]u8 = null,
+    /// Append-only buffer for all inserted text.
     add_buf: std.ArrayList(u8),
+    /// Ordered list of pieces referencing original or add_buf slices.
     pieces: std.ArrayList(Piece),
+    /// Total byte length of the document.
     total_len: u32,
     allocator: std.mem.Allocator,
     undo_stack: std.ArrayList(UndoEntry),
     redo_stack: std.ArrayList(UndoEntry),
-    last_edit_pos: ?u32 = null, // For undo coalescing
-    last_edit_time: i128 = 0, // nanoseconds from monotonic clock, for undo time-based break
-    line_offsets: std.ArrayList(u32), // line_offsets[i] = byte offset of line i
+    /// Position of last single-char insert, for undo coalescing.
+    last_edit_pos: ?u32 = null,
+    /// Timestamp of last edit in nanoseconds, for time-based undo breaks.
+    last_edit_time: i128 = 0,
+    /// Cached line start offsets; line_offsets[i] = byte offset of line i.
+    line_offsets: std.ArrayList(u32),
     line_cache_valid: bool = false,
 
     pub const Source = enum { original, add };
@@ -31,6 +41,7 @@ pub const PieceTable = struct {
         }
     };
 
+    /// Create a new PieceTable from initial content (may be empty).
     pub fn init(allocator: std.mem.Allocator, content: []const u8) !PieceTable {
         var pieces: std.ArrayList(Piece) = .{};
         if (content.len > 0) {
@@ -52,6 +63,7 @@ pub const PieceTable = struct {
         };
     }
 
+    /// Free all owned memory including undo/redo history.
     pub fn deinit(self: *PieceTable) void {
         if (self.owned_original) |o| self.allocator.free(o);
         self.pieces.deinit(self.allocator);
@@ -99,6 +111,7 @@ pub const PieceTable = struct {
         self.line_cache_valid = false;
     }
 
+    /// Return the number of lines (always >= 1; an empty buffer has 1 line).
     pub fn lineCount(self: *const PieceTable) u32 {
         self.ensureLineCache();
         return @intCast(self.line_offsets.items.len);
@@ -151,6 +164,7 @@ pub const PieceTable = struct {
         self.add_buf = new_add;
     }
 
+    /// Undo the last edit (or coalesced group). Returns false if nothing to undo.
     pub fn undo(self: *PieceTable) !bool {
         self.last_edit_pos = null;
         self.last_edit_time = 0;
@@ -173,6 +187,7 @@ pub const PieceTable = struct {
         return true;
     }
 
+    /// Redo the last undone edit. Returns false if nothing to redo.
     pub fn redo(self: *PieceTable) !bool {
         self.last_edit_time = 0;
         if (self.redo_stack.items.len == 0) return false;
@@ -196,6 +211,7 @@ pub const PieceTable = struct {
 
     // --- Core operations ---
 
+    /// Insert text at byte position `pos`. Consecutive single-char inserts coalesce into one undo entry.
     pub fn insert(self: *PieceTable, pos: u32, text: []const u8) !void {
         if (text.len == 0) return;
         if (pos > self.total_len) return error.OutOfBounds;
@@ -270,6 +286,7 @@ pub const PieceTable = struct {
         self.invalidateLineCache();
     }
 
+    /// Delete `len` bytes starting at byte position `pos`. Always creates a new undo entry.
     pub fn delete(self: *PieceTable, pos: u32, len: u32) !void {
         if (len == 0) return;
         if (pos + len > self.total_len) return error.OutOfBounds;
@@ -325,6 +342,7 @@ pub const PieceTable = struct {
         }
     }
 
+    /// Allocate and return the full document content as a contiguous slice.
     pub fn collectContent(self: *const PieceTable, allocator: std.mem.Allocator) ![]u8 {
         const result = try allocator.alloc(u8, self.total_len);
         var offset: usize = 0;
@@ -336,6 +354,7 @@ pub const PieceTable = struct {
         return result;
     }
 
+    /// Return the longest contiguous slice starting at `byte_offset` within a single piece.
     pub fn contiguousSliceAt(self: *const PieceTable, byte_offset: u32) []const u8 {
         var offset: u32 = 0;
         for (self.pieces.items) |piece| {
@@ -407,6 +426,7 @@ pub const PieceTable = struct {
 
     // --- Line/offset conversion ---
 
+    /// Return the byte offset where `target_line` begins (0-indexed). Returns total_len for out-of-range lines.
     pub fn lineToOffset(self: *const PieceTable, target_line: u32) u32 {
         self.ensureLineCache();
         if (target_line < self.line_offsets.items.len) {
@@ -415,6 +435,7 @@ pub const PieceTable = struct {
         return self.total_len;
     }
 
+    /// Convert a byte offset to a (line, col) pair via binary search on the line cache.
     pub fn offsetToLineCol(self: *const PieceTable, target_offset: u32) struct { line: u32, col: u32 } {
         self.ensureLineCache();
         const offsets = self.line_offsets.items;
@@ -757,4 +778,189 @@ test "extractRange across pieces" {
     const range = try buf.extractRange(std.testing.allocator, 3, 8);
     defer std.testing.allocator.free(range);
     try std.testing.expectEqualStrings("lo wo", range);
+}
+
+// =============================================================================
+// Stress tests
+// =============================================================================
+
+test "stress: random insert/delete cycle" {
+    var buf = try PieceTable.init(std.testing.allocator, "initial content here");
+    defer buf.deinit();
+
+    var rng = std.Random.DefaultPrng.init(42);
+    var random = rng.random();
+
+    var i: u32 = 0;
+    while (i < 500) : (i += 1) {
+        if (buf.total_len > 10 and random.boolean()) {
+            // Delete
+            const pos = random.intRangeAtMost(u32, 0, buf.total_len - 1);
+            const max_len = @min(buf.total_len - pos, 5);
+            const len = random.intRangeAtMost(u32, 1, max_len);
+            try buf.delete(pos, len);
+        } else {
+            // Insert
+            const pos = random.intRangeAtMost(u32, 0, buf.total_len);
+            const texts = [_][]const u8{ "a", "bc", "def", "\n", "hello " };
+            const text = texts[random.intRangeAtMost(usize, 0, texts.len - 1)];
+            try buf.insert(pos, text);
+        }
+    }
+
+    // Verify content is consistent
+    const content = try buf.collectContent(std.testing.allocator);
+    defer std.testing.allocator.free(content);
+    try std.testing.expectEqual(buf.total_len, @as(u32, @intCast(content.len)));
+
+    // Verify line cache consistency
+    const lc = buf.lineCount();
+    var expected_newlines: u32 = 0;
+    for (content) |ch| {
+        if (ch == '\n') expected_newlines += 1;
+    }
+    try std.testing.expectEqual(expected_newlines + 1, lc);
+}
+
+test "stress: undo all operations" {
+    var buf = try PieceTable.init(std.testing.allocator, "start");
+    defer buf.deinit();
+
+    // Do 50 edits (multi-char so each gets own undo entry)
+    var i: u32 = 0;
+    while (i < 50) : (i += 1) {
+        try buf.insert(buf.total_len, "xx");
+    }
+    try std.testing.expectEqual(@as(u32, 105), buf.total_len); // "start" + 50 * "xx"
+
+    // Undo all
+    var undo_count: u32 = 0;
+    while (try buf.undo()) {
+        undo_count += 1;
+        if (undo_count > 100) break; // Safety limit
+    }
+
+    // Should be back to "start"
+    try expectContent(&buf, "start");
+}
+
+test "stress: line cache consistency after many edits" {
+    var buf = try PieceTable.init(std.testing.allocator, "");
+    defer buf.deinit();
+
+    // Build a multi-line document
+    var i: u32 = 0;
+    while (i < 100) : (i += 1) {
+        try buf.insert(buf.total_len, "line\n");
+    }
+
+    try std.testing.expectEqual(@as(u32, 101), buf.lineCount()); // 100 newlines + 1
+
+    // Verify each line offset
+    i = 0;
+    while (i < 100) : (i += 1) {
+        try std.testing.expectEqual(i * 5, buf.lineToOffset(i));
+    }
+
+    // Delete some lines from the middle
+    const mid = buf.lineToOffset(50);
+    try buf.delete(mid, 25); // Delete 5 lines
+
+    // Line count should decrease
+    const new_count = buf.lineCount();
+    try std.testing.expect(new_count < 101);
+
+    // Offsets should still be consistent
+    const content = try buf.collectContent(std.testing.allocator);
+    defer std.testing.allocator.free(content);
+
+    var line: u32 = 0;
+    var offset: u32 = 0;
+    try std.testing.expectEqual(@as(u32, 0), buf.lineToOffset(0));
+    for (content) |ch| {
+        if (ch == '\n') {
+            line += 1;
+            try std.testing.expectEqual(offset + 1, buf.lineToOffset(line));
+        }
+        offset += 1;
+    }
+}
+
+// =============================================================================
+// Edge case tests
+// =============================================================================
+
+test "empty buffer operations" {
+    var buf = try PieceTable.init(std.testing.allocator, "");
+    defer buf.deinit();
+
+    try std.testing.expectEqual(@as(u32, 0), buf.total_len);
+    try std.testing.expectEqual(@as(u32, 1), buf.lineCount());
+    try std.testing.expectEqual(@as(u32, 0), buf.lineToOffset(0));
+
+    const lc = buf.offsetToLineCol(0);
+    try std.testing.expectEqual(@as(u32, 0), lc.line);
+    try std.testing.expectEqual(@as(u32, 0), lc.col);
+
+    // indexOf on empty
+    try std.testing.expectEqual(@as(?u32, null), buf.indexOf("x", 0));
+
+    // contiguousSliceAt on empty
+    try std.testing.expectEqualStrings("", buf.contiguousSliceAt(0));
+}
+
+test "single newline buffer" {
+    var buf = try PieceTable.init(std.testing.allocator, "\n");
+    defer buf.deinit();
+    try std.testing.expectEqual(@as(u32, 2), buf.lineCount());
+    try std.testing.expectEqual(@as(u32, 0), buf.lineToOffset(0));
+    try std.testing.expectEqual(@as(u32, 1), buf.lineToOffset(1));
+}
+
+test "offsetToLineCol at end of buffer" {
+    var buf = try PieceTable.init(std.testing.allocator, "abc\ndef");
+    defer buf.deinit();
+    const lc = buf.offsetToLineCol(7); // At very end
+    try std.testing.expectEqual(@as(u32, 1), lc.line);
+    try std.testing.expectEqual(@as(u32, 3), lc.col);
+}
+
+test "offsetToLineCol at newline" {
+    var buf = try PieceTable.init(std.testing.allocator, "abc\ndef");
+    defer buf.deinit();
+    const lc = buf.offsetToLineCol(3); // At the '\n'
+    try std.testing.expectEqual(@as(u32, 0), lc.line);
+    try std.testing.expectEqual(@as(u32, 3), lc.col);
+}
+
+test "extractRange empty range" {
+    var buf = try PieceTable.init(std.testing.allocator, "hello");
+    defer buf.deinit();
+    const range = try buf.extractRange(std.testing.allocator, 3, 3);
+    defer std.testing.allocator.free(range);
+    try std.testing.expectEqualStrings("", range);
+}
+
+test "extractRange full buffer" {
+    var buf = try PieceTable.init(std.testing.allocator, "hello");
+    defer buf.deinit();
+    const range = try buf.extractRange(std.testing.allocator, 0, 5);
+    defer std.testing.allocator.free(range);
+    try std.testing.expectEqualStrings("hello", range);
+}
+
+test "indexOf empty needle" {
+    var buf = try PieceTable.init(std.testing.allocator, "hello");
+    defer buf.deinit();
+    try std.testing.expectEqual(@as(?u32, null), buf.indexOf("", 0));
+}
+
+test "multiple newlines only" {
+    var buf = try PieceTable.init(std.testing.allocator, "\n\n\n");
+    defer buf.deinit();
+    try std.testing.expectEqual(@as(u32, 4), buf.lineCount());
+    try std.testing.expectEqual(@as(u32, 0), buf.lineToOffset(0));
+    try std.testing.expectEqual(@as(u32, 1), buf.lineToOffset(1));
+    try std.testing.expectEqual(@as(u32, 2), buf.lineToOffset(2));
+    try std.testing.expectEqual(@as(u32, 3), buf.lineToOffset(3));
 }

@@ -1,10 +1,14 @@
 const std = @import("std");
 const PieceTable = @import("buffer.zig").PieceTable;
 
+/// A text selection defined by two byte offsets. When anchor == head, no text is selected.
 pub const Selection = struct {
+    /// The fixed end of the selection (where the selection started).
     anchor: u32,
+    /// The moving end of the selection (where the cursor is).
     head: u32,
 
+    /// Returns true if anchor and head differ (text is selected).
     pub fn hasSelection(self: Selection) bool {
         return self.anchor != self.head;
     }
@@ -22,11 +26,15 @@ pub const Selection = struct {
     }
 };
 
+/// Multi-cursor state with selection tracking and UTF-8 aware movement.
 pub const CursorState = struct {
+    /// All active cursors/selections. Index 0 is the primary cursor.
     cursors: std.ArrayList(Selection),
+    /// Sticky column for vertical movement (preserved across short lines).
     desired_col: ?u32 = null,
     allocator: std.mem.Allocator,
 
+    /// Create a CursorState with a single cursor at position 0.
     pub fn init(allocator: std.mem.Allocator) !CursorState {
         var cursors: std.ArrayList(Selection) = .{};
         try cursors.append(allocator, .{ .anchor = 0, .head = 0 });
@@ -41,15 +49,18 @@ pub const CursorState = struct {
         return self.cursors.items[0];
     }
 
+    /// Move the primary cursor to `pos`, collapsing any selection.
     pub fn moveTo(self: *CursorState, pos: u32) void {
         self.cursors.items[0] = .{ .anchor = pos, .head = pos };
         self.desired_col = null;
     }
 
+    /// Extend the primary selection to `pos` (anchor stays fixed).
     pub fn selectTo(self: *CursorState, pos: u32) void {
         self.cursors.items[0].head = pos;
     }
 
+    /// Move right by one UTF-8 codepoint. If `extend` is true, grow the selection.
     pub fn moveRight(self: *CursorState, buf: *const PieceTable, extend: bool) void {
         const cur = &self.cursors.items[0];
         if (cur.head < buf.total_len) {
@@ -65,6 +76,7 @@ pub const CursorState = struct {
         self.desired_col = null;
     }
 
+    /// Move left by one UTF-8 codepoint, scanning back over continuation bytes.
     pub fn moveLeft(self: *CursorState, buf: *const PieceTable, extend: bool) void {
         const cur = &self.cursors.items[0];
         if (cur.head > 0) {
@@ -103,6 +115,7 @@ pub const CursorState = struct {
 
     // ── Multi-cursor support ─────────────────────────────────────────
 
+    /// Add a new cursor at `pos` (multi-cursor editing).
     pub fn addCursorAt(self: *CursorState, pos: u32) !void {
         try self.cursors.append(self.allocator, .{ .anchor = pos, .head = pos });
     }
