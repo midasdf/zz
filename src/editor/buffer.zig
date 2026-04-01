@@ -10,6 +10,7 @@ pub const PieceTable = struct {
     undo_stack: std.ArrayList(UndoEntry),
     redo_stack: std.ArrayList(UndoEntry),
     last_edit_pos: ?u32 = null, // For undo coalescing
+    last_edit_time: i128 = 0, // nanoseconds from monotonic clock, for undo time-based break
     line_offsets: std.ArrayList(u32), // line_offsets[i] = byte offset of line i
     line_cache_valid: bool = false,
 
@@ -152,6 +153,7 @@ pub const PieceTable = struct {
 
     pub fn undo(self: *PieceTable) !bool {
         self.last_edit_pos = null;
+        self.last_edit_time = 0;
         if (self.undo_stack.items.len == 0) return false;
 
         const current_snapshot = try self.allocator.dupe(Piece, self.pieces.items);
@@ -172,6 +174,7 @@ pub const PieceTable = struct {
     }
 
     pub fn redo(self: *PieceTable) !bool {
+        self.last_edit_time = 0;
         if (self.redo_stack.items.len == 0) return false;
 
         const current_snapshot = try self.allocator.dupe(Piece, self.pieces.items);
@@ -197,14 +200,20 @@ pub const PieceTable = struct {
         if (text.len == 0) return;
         if (pos > self.total_len) return error.OutOfBounds;
 
-        // Coalesce: single-char inserts at consecutive positions share one undo entry
+        // Coalesce: single-char inserts at consecutive positions share one undo entry,
+        // but break if more than 1 second has passed since the last edit
+        const now = std.time.nanoTimestamp();
+        const time_gap = now - self.last_edit_time;
+        const time_threshold: i128 = 1_000_000_000; // 1 second in ns
         const is_coalesced = text.len == 1 and text[0] != '\n' and
             self.last_edit_pos != null and pos == self.last_edit_pos.? + 1 and
-            self.undo_stack.items.len > 0;
+            self.undo_stack.items.len > 0 and
+            time_gap < time_threshold;
         if (!is_coalesced) {
             try self.pushUndo();
         }
         self.last_edit_pos = pos;
+        self.last_edit_time = now;
 
         const add_start: u32 = @intCast(self.add_buf.items.len);
         try self.add_buf.appendSlice(self.allocator, text);
@@ -266,6 +275,7 @@ pub const PieceTable = struct {
         if (pos + len > self.total_len) return error.OutOfBounds;
 
         self.last_edit_pos = null; // Break undo coalescing
+        self.last_edit_time = 0;
         try self.pushUndo();
 
         const end = pos + len;
@@ -682,4 +692,69 @@ test "line cache empty buffer" {
     const lc = buf.offsetToLineCol(0);
     try std.testing.expectEqual(@as(u32, 0), lc.line);
     try std.testing.expectEqual(@as(u32, 0), lc.col);
+}
+
+test "insert at piece boundary" {
+    var buf = try PieceTable.init(std.testing.allocator, "hello");
+    defer buf.deinit();
+    try buf.insert(5, " world");
+    try buf.insert(5, ","); // Insert at exact boundary between pieces
+    try expectContent(&buf, "hello, world");
+}
+
+test "delete entire content" {
+    var buf = try PieceTable.init(std.testing.allocator, "hello");
+    defer buf.deinit();
+    try buf.delete(0, 5);
+    try std.testing.expectEqual(@as(u32, 0), buf.total_len);
+    try expectContent(&buf, "");
+}
+
+test "rapid insert delete cycle" {
+    var buf = try PieceTable.init(std.testing.allocator, "");
+    defer buf.deinit();
+    // Simulate rapid typing and deleting
+    var i: u32 = 0;
+    while (i < 100) : (i += 1) {
+        try buf.insert(i, "x");
+    }
+    try std.testing.expectEqual(@as(u32, 100), buf.total_len);
+    // Delete all
+    try buf.delete(0, 100);
+    try std.testing.expectEqual(@as(u32, 0), buf.total_len);
+}
+
+test "indexOf basic" {
+    var buf = try PieceTable.init(std.testing.allocator, "hello world hello");
+    defer buf.deinit();
+    try std.testing.expectEqual(@as(?u32, 0), buf.indexOf("hello", 0));
+    try std.testing.expectEqual(@as(?u32, 12), buf.indexOf("hello", 1));
+    try std.testing.expectEqual(@as(?u32, 6), buf.indexOf("world", 0));
+    try std.testing.expectEqual(@as(?u32, null), buf.indexOf("xyz", 0));
+}
+
+test "indexOf across pieces" {
+    var buf = try PieceTable.init(std.testing.allocator, "hel");
+    defer buf.deinit();
+    try buf.insert(3, "lo world");
+    // "hello world" split across two pieces at position 3
+    try std.testing.expectEqual(@as(?u32, 0), buf.indexOf("hello", 0));
+    try std.testing.expectEqual(@as(?u32, 2), buf.indexOf("llo", 0));
+}
+
+test "extractRange" {
+    var buf = try PieceTable.init(std.testing.allocator, "hello world");
+    defer buf.deinit();
+    const range = try buf.extractRange(std.testing.allocator, 6, 11);
+    defer std.testing.allocator.free(range);
+    try std.testing.expectEqualStrings("world", range);
+}
+
+test "extractRange across pieces" {
+    var buf = try PieceTable.init(std.testing.allocator, "hello");
+    defer buf.deinit();
+    try buf.insert(5, " world");
+    const range = try buf.extractRange(std.testing.allocator, 3, 8);
+    defer std.testing.allocator.free(range);
+    try std.testing.expectEqualStrings("lo wo", range);
 }

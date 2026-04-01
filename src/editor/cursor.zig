@@ -247,3 +247,52 @@ test "utf8 move right" {
     cs.moveRight(&buf, false); // skip 'b'
     try std.testing.expectEqual(@as(u32, 5), cs.primary().head);
 }
+
+test "add cursor" {
+    var cs = try CursorState.init(std.testing.allocator);
+    defer cs.deinit();
+
+    try cs.addCursorAt(5);
+    try std.testing.expectEqual(@as(usize, 2), cs.cursorCount());
+    try std.testing.expectEqual(@as(u32, 0), cs.cursors.items[0].head);
+    try std.testing.expectEqual(@as(u32, 5), cs.cursors.items[1].head);
+}
+
+test "collapse to single" {
+    var cs = try CursorState.init(std.testing.allocator);
+    defer cs.deinit();
+
+    try cs.addCursorAt(1);
+    try cs.addCursorAt(2);
+    try std.testing.expectEqual(@as(usize, 3), cs.cursorCount());
+    cs.collapseToSingle();
+    try std.testing.expectEqual(@as(usize, 1), cs.cursorCount());
+}
+
+test "sort descending" {
+    var cs = try CursorState.init(std.testing.allocator);
+    defer cs.deinit();
+
+    cs.moveTo(1);
+    try cs.addCursorAt(5);
+    try cs.addCursorAt(3);
+    cs.sortDescending();
+    try std.testing.expectEqual(@as(u32, 5), cs.cursors.items[0].head);
+    try std.testing.expectEqual(@as(u32, 3), cs.cursors.items[1].head);
+    try std.testing.expectEqual(@as(u32, 1), cs.cursors.items[2].head);
+}
+
+test "desired col sticky" {
+    var buf = try PieceTable.init(std.testing.allocator, "abcde\nab\nabcde");
+    defer buf.deinit();
+    var cs = try CursorState.init(std.testing.allocator);
+    defer cs.deinit();
+
+    cs.moveTo(4); // Column 4 of line 1
+    cs.desired_col = 4; // Simulate vertical movement setting desired col
+    // After moving through short line, desired_col should persist
+    try std.testing.expectEqual(@as(?u32, 4), cs.desired_col);
+
+    cs.moveRight(&buf, false);
+    try std.testing.expectEqual(@as(?u32, null), cs.desired_col); // Horizontal movement resets
+}

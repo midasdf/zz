@@ -25,7 +25,7 @@ const popups = @import("ui/popups.zig");
 fn logError(context: []const u8, err: anyerror) void {
     var buf: [128]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, "zz: {s}: {s}\n", .{ context, @errorName(err) }) catch return;
-    _ = std.posix.write(std.posix.STDERR_FILENO, msg) catch {};
+    _ = std.posix.write(std.posix.STDERR_FILENO, msg) catch {}; // last-resort log, nowhere to report
 }
 
 const EditorMode = enum {
@@ -216,7 +216,7 @@ pub fn main() !void {
             .events = std.os.linux.EPOLL.IN,
             .data = .{ .u32 = 2 },
         };
-        std.posix.epoll_ctl(epoll_fd, std.os.linux.EPOLL.CTL_ADD, lsp_fd, &lsp_ev) catch {};
+        std.posix.epoll_ctl(epoll_fd, std.os.linux.EPOLL.CTL_ADD, lsp_fd, &lsp_ev) catch {}; // non-fatal: LSP poll optional
     }
 
     var running = true;
@@ -281,7 +281,7 @@ pub fn main() !void {
                                             const item = lsp_client.completion_items.items[completion_selected];
                                             // Delete the partial word being typed, then insert completion
                                             lsp_ops.deleteWordBeforeCursor(editor);
-                                            editor.insertAtCursor(item.label) catch {};
+                                            editor.insertAtCursor(item.label) catch {}; // OOM: completion insert best-effort
                                             lsp_needs_sync = true;
                                         }
                                         completion_active = false;
@@ -315,7 +315,7 @@ pub fn main() !void {
                                                 }
                                             } else {
                                                 if (pty_registered) |reg_fd| {
-                                                    std.posix.epoll_ctl(epoll_fd, std.os.linux.EPOLL.CTL_DEL, reg_fd, null) catch {};
+                                                    std.posix.epoll_ctl(epoll_fd, std.os.linux.EPOLL.CTL_DEL, reg_fd, null) catch {}; // non-fatal: epoll cleanup
                                                     pty_registered = null;
                                                 }
                                             }
@@ -456,7 +456,7 @@ pub fn main() !void {
                                     const text = te.slice();
                                     const auto_closed = editor.insertWithAutoClose(text) catch false;
                                     if (!auto_closed) {
-                                        editor.insertAtCursor(text) catch {};
+                                        editor.insertAtCursor(text) catch {}; // OOM: text input best-effort
                                     }
                                     lsp_needs_sync = true;
                                     resetCursorBlink(editor);
@@ -611,7 +611,7 @@ pub fn main() !void {
                                     terminal.handlePaste(pe.data);
                                 } else {
                                     const active = pane_mgr.active_leaf;
-                                    active.insertAtCursor(pe.data) catch {};
+                                    active.insertAtCursor(pe.data) catch {}; // OOM: paste best-effort
                                     lsp_needs_sync = true;
                                     resetCursorBlink(editor);
                                 }
@@ -634,7 +634,7 @@ pub fn main() !void {
                 1 => { // cursor blink timer
                     const editor = pane_mgr.active_leaf;
                     var buf: [8]u8 = undefined;
-                    _ = std.posix.read(timer_fd, &buf) catch {};
+                    _ = std.posix.read(timer_fd, &buf) catch {}; // non-fatal: drain timer fd
                     editor.cursor_visible = !editor.cursor_visible;
                     const lc = editor.buffer.offsetToLineCol(editor.cursor.primary().head);
                     if (lc.line >= editor.scroll_line) {
@@ -746,7 +746,7 @@ pub fn main() !void {
                             // Populate overlay with action titles
                             filtered_display.clearRetainingCapacity();
                             for (lsp_client.code_actions.items) |ca| {
-                                filtered_display.append(allocator, ca.title) catch {};
+                                filtered_display.append(allocator, ca.title) catch {}; // OOM: skip display item
                             }
                             overlay.items = filtered_display.items;
                             editor.markAllDirty();
@@ -952,31 +952,31 @@ fn handleAction(editor: *EditorView, win: *Window, action: keymap.Action, lsp_cl
         .backspace => {
             const pair_deleted = editor.backspaceWithPairDelete() catch false;
             if (!pair_deleted) {
-                editor.backspace() catch {};
+                editor.backspace() catch {}; // OOM: edit best-effort
             }
             lsp_sync.* = true;
         },
         .delete => {
-            editor.deleteForward() catch {};
+            editor.deleteForward() catch {}; // OOM: edit best-effort
             lsp_sync.* = true;
         },
         .delete_word_left => {
-            editor.deleteWordLeft() catch {};
+            editor.deleteWordLeft() catch {}; // OOM: edit best-effort
             lsp_sync.* = true;
         },
         .delete_word_right => {
-            editor.deleteWordRight() catch {};
+            editor.deleteWordRight() catch {}; // OOM: edit best-effort
             lsp_sync.* = true;
         },
         .enter => {
-            editor.insertNewline() catch {};
+            editor.insertNewline() catch {}; // OOM: edit best-effort
             lsp_sync.* = true;
         },
         .tab => {
             if (editor.cursor.primary().hasSelection()) {
-                editor.indentSelectedLines() catch {};
+                editor.indentSelectedLines() catch {}; // OOM: edit best-effort
             } else {
-                editor.insertAtCursor("    ") catch {};
+                editor.insertAtCursor("    ") catch {}; // OOM: edit best-effort
             }
             lsp_sync.* = true;
         },
@@ -988,7 +988,7 @@ fn handleAction(editor: *EditorView, win: *Window, action: keymap.Action, lsp_cl
         .cut => {
             if (editor.getSelectedText()) |text| {
                 win.setClipboard(text);
-                editor.deleteSelection() catch {};
+                editor.deleteSelection() catch {}; // OOM: edit best-effort
                 lsp_sync.* = true;
             }
         },
@@ -996,12 +996,12 @@ fn handleAction(editor: *EditorView, win: *Window, action: keymap.Action, lsp_cl
             win.requestClipboard();
         },
         .undo => {
-            _ = editor.buffer.undo() catch {};
+            _ = editor.buffer.undo() catch {}; // OOM: undo best-effort
             lsp_sync.* = true;
             editor.markAllDirty();
         },
         .redo => {
-            _ = editor.buffer.redo() catch {};
+            _ = editor.buffer.redo() catch {}; // OOM: redo best-effort
             lsp_sync.* = true;
             editor.markAllDirty();
         },
@@ -1032,10 +1032,10 @@ fn handleAction(editor: *EditorView, win: *Window, action: keymap.Action, lsp_cl
             }
         },
         .select_next_occurrence => {
-            editor.selectNextOccurrence() catch {};
+            editor.selectNextOccurrence() catch {}; // OOM: multi-cursor best-effort
         },
         .select_all_occurrences => {
-            editor.selectAllOccurrences() catch {};
+            editor.selectAllOccurrences() catch {}; // OOM: multi-cursor best-effort
         },
         .escape => {
             if (editor.cursor.cursorCount() > 1) {
@@ -1044,19 +1044,19 @@ fn handleAction(editor: *EditorView, win: *Window, action: keymap.Action, lsp_cl
             }
         },
         .duplicate_line => {
-            editor.duplicateLine() catch {};
+            editor.duplicateLine() catch {}; // OOM: edit best-effort
             lsp_sync.* = true;
         },
         .move_line_up => {
-            editor.moveLineUp() catch {};
+            editor.moveLineUp() catch {}; // OOM: edit best-effort
             lsp_sync.* = true;
         },
         .move_line_down => {
-            editor.moveLineDown() catch {};
+            editor.moveLineDown() catch {}; // OOM: edit best-effort
             lsp_sync.* = true;
         },
         .delete_line => {
-            editor.deleteLine() catch {};
+            editor.deleteLine() catch {}; // OOM: edit best-effort
             lsp_sync.* = true;
         },
         // These are handled before reaching handleAction
@@ -1068,26 +1068,26 @@ fn handleAction(editor: *EditorView, win: *Window, action: keymap.Action, lsp_cl
         .goto_symbol, .toggle_fold => {},
         .rename_symbol, .code_action, .goto_references => {},
         .toggle_comment => {
-            editor.toggleComment() catch {};
+            editor.toggleComment() catch {}; // OOM: edit best-effort
             lsp_sync.* = true;
         },
         .select_line => {
             editor.selectLine();
         },
         .join_lines => {
-            editor.joinLines() catch {};
+            editor.joinLines() catch {}; // OOM: edit best-effort
             lsp_sync.* = true;
         },
         .insert_line_below => {
-            editor.insertLineBelow() catch {};
+            editor.insertLineBelow() catch {}; // OOM: edit best-effort
             lsp_sync.* = true;
         },
         .insert_line_above => {
-            editor.insertLineAbove() catch {};
+            editor.insertLineAbove() catch {}; // OOM: edit best-effort
             lsp_sync.* = true;
         },
         .outdent_lines => {
-            editor.outdentSelectedLines() catch {};
+            editor.outdentSelectedLines() catch {}; // OOM: edit best-effort
             lsp_sync.* = true;
         },
         .goto_file_start => {
@@ -1239,7 +1239,7 @@ fn saveFile(editor: *EditorView) void {
     const file = std.fs.cwd().createFile(tmp_path, .{}) catch return;
     file.writeAll(trimmed) catch {
         file.close();
-        std.fs.cwd().deleteFile(tmp_path) catch {};
+        std.fs.cwd().deleteFile(tmp_path) catch {}; // non-fatal: temp file cleanup
         return;
     };
     file.close();
@@ -1404,7 +1404,7 @@ fn openCommandPalette(mode: *EditorMode, overlay: *Overlay, filtered_display: *s
     // Pre-populate with all commands
     filtered_display.clearRetainingCapacity();
     for (&command_list) |cmd| {
-        filtered_display.append(allocator, cmd) catch {};
+        filtered_display.append(allocator, cmd) catch {}; // OOM: skip display item
     }
     overlay.items = filtered_display.items;
 }
@@ -1420,7 +1420,7 @@ fn openFileFinder(mode: *EditorMode, overlay: *Overlay, allocator: std.mem.Alloc
     filtered_display.clearRetainingCapacity();
     if (file_list.*) |files| {
         for (files) |f| {
-            filtered_display.append(allocator, f) catch {};
+            filtered_display.append(allocator, f) catch {}; // OOM: skip display item
         }
     }
     overlay.items = filtered_display.items;
@@ -1924,10 +1924,10 @@ fn executeCommand(cmd_name: []const u8, editor: *EditorView, tab_mgr: *TabManage
     if (std.mem.eql(u8, cmd_name, "File: Save")) {
         saveFile(editor);
     } else if (std.mem.eql(u8, cmd_name, "Edit: Undo")) {
-        _ = editor.buffer.undo() catch {};
+        _ = editor.buffer.undo() catch {}; // OOM: undo best-effort
         editor.markAllDirty();
     } else if (std.mem.eql(u8, cmd_name, "Edit: Redo")) {
-        _ = editor.buffer.redo() catch {};
+        _ = editor.buffer.redo() catch {}; // OOM: redo best-effort
         editor.markAllDirty();
     } else if (std.mem.eql(u8, cmd_name, "Edit: Select All")) {
         editor.cursor.cursors.items[0] = .{ .anchor = 0, .head = editor.buffer.total_len };
@@ -1950,15 +1950,15 @@ fn executeCommand(cmd_name: []const u8, editor: *EditorView, tab_mgr: *TabManage
         view_mod.cycleTheme();
         editor.markAllDirty();
     } else if (std.mem.eql(u8, cmd_name, "Edit: Sort Lines (Ascending)")) {
-        editor.sortSelectedLines(false) catch {};
+        editor.sortSelectedLines(false) catch {}; // OOM: edit best-effort
     } else if (std.mem.eql(u8, cmd_name, "Edit: Sort Lines (Descending)")) {
-        editor.sortSelectedLines(true) catch {};
+        editor.sortSelectedLines(true) catch {}; // OOM: edit best-effort
     } else if (std.mem.eql(u8, cmd_name, "Transform: UPPER CASE")) {
-        editor.transformCase(.upper) catch {};
+        editor.transformCase(.upper) catch {}; // OOM: edit best-effort
     } else if (std.mem.eql(u8, cmd_name, "Transform: lower case")) {
-        editor.transformCase(.lower) catch {};
+        editor.transformCase(.lower) catch {}; // OOM: edit best-effort
     } else if (std.mem.eql(u8, cmd_name, "Transform: Title Case")) {
-        editor.transformCase(.title) catch {};
+        editor.transformCase(.title) catch {}; // OOM: edit best-effort
     } else if (std.mem.eql(u8, cmd_name, "Tab: Close Other Tabs")) {
         tab_mgr.closeOthers();
         syncPaneToActiveTab(pane_mgr, tab_mgr);
