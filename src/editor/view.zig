@@ -1305,6 +1305,57 @@ pub const EditorView = struct {
             }
         }
 
+        // -- Selection info (center) --
+        const sel = self.cursor.primary();
+        var sel_info_buf: [48]u8 = undefined;
+        var sel_info_len: usize = 0;
+        if (sel.hasSelection()) {
+            const sel_chars = sel.end() - sel.start();
+            // Count newlines in selection
+            var newlines: u32 = 0;
+            var scan = sel.start();
+            while (scan < sel.end()) {
+                const s = self.buffer.contiguousSliceAt(scan);
+                if (s.len == 0) break;
+                const chunk = @min(s.len, sel.end() - scan);
+                for (s[0..chunk]) |ch| {
+                    if (ch == '\n') newlines += 1;
+                }
+                scan += @intCast(chunk);
+            }
+            if (newlines > 0) {
+                var nl_buf: [12]u8 = undefined;
+                const nl_str = formatU32(newlines + 1, &nl_buf);
+                var ch_buf: [12]u8 = undefined;
+                const ch_str = formatU32(sel_chars, &ch_buf);
+                const parts = [_][]const u8{ nl_str, " lines, ", ch_str, " chars" };
+                for (parts) |part| {
+                    @memcpy(sel_info_buf[sel_info_len..][0..part.len], part);
+                    sel_info_len += part.len;
+                }
+            } else {
+                var ch_buf: [12]u8 = undefined;
+                const ch_str = formatU32(sel_chars, &ch_buf);
+                const parts = [_][]const u8{ ch_str, " chars" };
+                for (parts) |part| {
+                    @memcpy(sel_info_buf[sel_info_len..][0..part.len], part);
+                    sel_info_len += part.len;
+                }
+            }
+            // Render selection info after the left section with a separator
+            const sel_sep = "   ";
+            for (sel_sep) |ch| {
+                if (left_col >= self.visible_cols) break;
+                self.drawStatusChar(renderer, font, ch, left_col, text_y, theme.surface2);
+                left_col += 1;
+            }
+            for (sel_info_buf[0..sel_info_len]) |ch| {
+                if (left_col >= self.visible_cols) break;
+                self.drawStatusChar(renderer, font, ch, left_col, text_y, theme.lavender);
+                left_col += 1;
+            }
+        }
+
         // -- Right section: language, line:col, encoding --
         const lang_name = self.highlighter.languageName();
         var right_buf: [192]u8 = undefined;
@@ -1696,6 +1747,106 @@ pub const EditorView = struct {
             if (line > entry.key_ptr.* and line <= entry.value_ptr.*) return true;
         }
         return false;
+    }
+
+    // ── Toggle line comment ──────────────────────────────────────
+
+    pub fn toggleComment(self: *EditorView) !void {
+        const comment_prefix = self.getCommentPrefix();
+
+        const sel = self.cursor.primary();
+        const start_lc = self.buffer.offsetToLineCol(sel.start());
+        const end_lc = self.buffer.offsetToLineCol(if (sel.hasSelection()) sel.end() -| 1 else sel.head);
+
+        // Check if ALL lines in range start with the comment prefix (after whitespace)
+        var all_commented = true;
+        var line = start_lc.line;
+        while (line <= end_lc.line) : (line += 1) {
+            const line_start = self.buffer.lineToOffset(line);
+            var off = line_start;
+            while (off < self.buffer.total_len) {
+                const s = self.buffer.contiguousSliceAt(off);
+                if (s.len == 0 or (s[0] != ' ' and s[0] != '\t')) break;
+                off += 1;
+            }
+            if (!self.hasCommentAt(off, comment_prefix)) {
+                all_commented = false;
+                break;
+            }
+        }
+
+        // Apply: toggle comment on each line, back-to-front to preserve offsets
+        var apply_line = end_lc.line + 1;
+        while (apply_line > start_lc.line) {
+            apply_line -= 1;
+            const line_start = self.buffer.lineToOffset(apply_line);
+
+            if (all_commented) {
+                // Remove comment prefix
+                var off = line_start;
+                while (off < self.buffer.total_len) {
+                    const s = self.buffer.contiguousSliceAt(off);
+                    if (s.len == 0 or (s[0] != ' ' and s[0] != '\t')) break;
+                    off += 1;
+                }
+                if (self.hasCommentAt(off, comment_prefix)) {
+                    var del_len: u32 = @intCast(comment_prefix.len);
+                    if (off + del_len < self.buffer.total_len) {
+                        const after = self.buffer.contiguousSliceAt(off + del_len);
+                        if (after.len > 0 and after[0] == ' ') del_len += 1;
+                    }
+                    try self.buffer.delete(off, del_len);
+                    self.highlighter.notifyEdit(&self.buffer, off, off + del_len, off);
+                }
+            } else {
+                // Add comment prefix after existing indent
+                var off = line_start;
+                while (off < self.buffer.total_len) {
+                    const s = self.buffer.contiguousSliceAt(off);
+                    if (s.len == 0 or (s[0] != ' ' and s[0] != '\t')) break;
+                    off += 1;
+                }
+                var prefix_buf: [8]u8 = undefined;
+                const plen = comment_prefix.len;
+                @memcpy(prefix_buf[0..plen], comment_prefix);
+                prefix_buf[plen] = ' ';
+                const prefix_with_space = prefix_buf[0 .. plen + 1];
+                try self.buffer.insert(off, prefix_with_space);
+                self.highlighter.notifyEdit(&self.buffer, off, off, off + @as(u32, @intCast(prefix_with_space.len)));
+            }
+        }
+
+        self.modified = true;
+        self.markAllDirty();
+    }
+
+    fn getCommentPrefix(self: *const EditorView) []const u8 {
+        const lang = self.highlighter.languageName();
+        if (std.mem.eql(u8, lang, "Python")) return "#";
+        if (std.mem.eql(u8, lang, "Bash")) return "#";
+        return "//"; // C, Rust, JavaScript, Zig, default
+    }
+
+    fn hasCommentAt(self: *const EditorView, off: u32, prefix: []const u8) bool {
+        if (off + prefix.len > self.buffer.total_len) return false;
+        for (prefix, 0..) |ch, i| {
+            const s = self.buffer.contiguousSliceAt(off + @as(u32, @intCast(i)));
+            if (s.len == 0 or s[0] != ch) return false;
+        }
+        return true;
+    }
+
+    // ── Select line ──────────────────────────────────────────────────
+
+    pub fn selectLine(self: *EditorView) void {
+        const lc = self.buffer.offsetToLineCol(self.cursor.primary().head);
+        const line_start = self.buffer.lineToOffset(lc.line);
+        const next_line = if (lc.line + 1 < self.buffer.lineCount())
+            self.buffer.lineToOffset(lc.line + 1)
+        else
+            self.buffer.total_len;
+        self.cursor.cursors.items[0] = .{ .anchor = line_start, .head = next_line };
+        self.markAllDirty();
     }
 
     // ── Bracket matching ──────────────────────────────────────────

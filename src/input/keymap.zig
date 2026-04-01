@@ -84,6 +84,10 @@ pub const Action = enum {
     toggle_fold,
     // Minimap
     toggle_minimap,
+    // Toggle comment
+    toggle_comment,
+    // Select line
+    select_line,
 };
 
 pub fn modFromWindow(mods: Window.Modifiers) Modifier {
@@ -106,6 +110,8 @@ pub fn mapKey(keysym: u32, mods: Modifier) ?Action {
         if (keysym == Window.XK_grave) return .toggle_terminal;
         // Ctrl+Space -> trigger completion
         if (keysym == ' ') return .trigger_completion;
+        // Ctrl+/ -> toggle comment
+        if (keysym == '/') return .toggle_comment;
         const k = if (keysym >= 'A' and keysym <= 'Z') keysym + 32 else keysym;
         return switch (k) {
             'a' => .select_all,
@@ -122,6 +128,7 @@ pub fn mapKey(keysym: u32, mods: Modifier) ?Action {
             'h' => .find_replace,
             'd' => .select_next_occurrence,
             'g' => .goto_line,
+            'l' => .select_line,
             else => null,
         };
     }

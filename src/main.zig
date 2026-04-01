@@ -942,6 +942,14 @@ fn handleAction(editor: *EditorView, win: *Window, action: keymap.Action, lsp_cl
         .split_vertical, .split_horizontal, .focus_next_pane, .close_pane => {},
         .toggle_sidebar, .toggle_terminal, .toggle_minimap => {},
         .goto_symbol, .toggle_fold => {},
+        .toggle_comment => {
+            editor.toggleComment() catch {};
+            notifyLspChange(editor, lsp_client, allocator);
+            editor.markAllDirty();
+        },
+        .select_line => {
+            editor.selectLine();
+        },
     }
 }
 
