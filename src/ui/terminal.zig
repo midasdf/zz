@@ -160,6 +160,13 @@ pub const Terminal = struct {
 
         const argv = [_:null]?[*:0]const u8{ cmd_z, flag_z, wid_z, null };
 
+        // Debug: log what we're spawning
+        {
+            var dbg: [256]u8 = undefined;
+            const msg = std.fmt.bufPrint(&dbg, "zz: spawn terminal: {s} {s} {s} (win={d} {d}x{d}+{d}+{d})\n", .{ cmd_name, embed_flag, wid_str, self.child_window, self.width, self.height, self.x, self.y }) catch "";
+            _ = posix.write(posix.STDERR_FILENO, msg) catch {};
+        }
+
         const fork_result = posix.fork() catch return;
         if (fork_result == 0) {
             // Child process: exec the terminal emulator
