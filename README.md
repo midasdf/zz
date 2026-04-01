@@ -35,6 +35,9 @@ A lightweight, fast code editor written in Zig. No AI, no telemetry, no bloat.
 - **Multi-cursor** editing (Ctrl+D, Ctrl+Shift+L)
 - **Split panes** (vertical/horizontal, binary tree layout)
 - **Tabs** with multi-file editing
+- **Auto-indent** on Enter (copies whitespace, extra indent after `{`)
+- **Line operations** (duplicate, move up/down, delete)
+- **Bracket matching** with highlight
 - **UTF-8** with CJK wide character support
 - **XIM/fcitx5** input method for Japanese/Chinese
 
@@ -53,6 +56,11 @@ A lightweight, fast code editor written in Zig. No AI, no telemetry, no bloat.
 - **Ctrl+P** fuzzy file finder (.gitignore aware)
 - **Ctrl+Shift+P** command palette
 - **Ctrl+F** text search with wrap-around
+- **Ctrl+H** find and replace
+- **Ctrl+Shift+F** search across project files
+- **Ctrl+Shift+O** go to symbol (LSP document symbols)
+- **Code folding** (Ctrl+Shift+[) with bracket matching
+- **Minimap** code overview with syntax colors
 
 ### Extras
 - **File tree** sidebar (Ctrl+B) with expand/collapse
@@ -134,6 +142,8 @@ zig build -Doptimize=ReleaseFast  # Release build (3.1MB)
 | Ctrl+Shift+D | Duplicate line |
 | Alt+Up / Down | Move line up / down |
 | Ctrl+Shift+K | Delete line |
+| Ctrl+Shift+O | Go to symbol |
+| Ctrl+Shift+[ | Toggle code fold |
 
 ## Architecture
 
@@ -164,7 +174,7 @@ src/
     └── keymap.zig        Keybind mapping
 ```
 
-**~12,000 lines of Zig. Zero external Zig dependencies.**
+**~13,000 lines of Zig. Zero external Zig dependencies.**
 
 All rendering is CPU-based (xcb shared memory). No GPU, no OpenGL, no Wayland (yet). Single-threaded epoll event loop. The only subprocess communication is with LSP servers (JSON-RPC over stdin/stdout) and the embedded terminal (PTY).
 
@@ -172,12 +182,12 @@ All rendering is CPU-based (xcb shared memory). No GPU, no OpenGL, no Wayland (y
 
 | Metric | Value |
 |--------|-------|
-| Binary (ReleaseFast) | 3.3 MB |
+| Binary (ReleaseFast) | 3.4 MB |
 | Binary (ReleaseSmall + strip) | ~240 KB |
 | Memory (RSS) | ~18 MB |
 | Idle CPU | 0% |
 | Startup time | Instant (mmap + single piece) |
-| Source lines | ~12,000 |
+| Source lines | ~13,000 |
 | Dependencies (Zig packages) | 0 |
 
 ## License
