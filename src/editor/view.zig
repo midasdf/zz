@@ -111,10 +111,12 @@ pub const EditorView = struct {
     pub fn updateViewport(self: *EditorView, win_width: u32, win_height: u32, font: *const FontFace) !void {
         if (font.cell_height == 0 or font.cell_width == 0) return;
 
-        // Available height = window height minus tab bar offset and status bar (2 rows)
-        const avail_h = if (win_height > self.y_offset) win_height - self.y_offset else 0;
+        // Available height = window height minus tab bar offset and status bar
+        // Status bar = 1px separator + cell_height + 4px padding
+        const status_bar_h: u32 = font.cell_height + 5;
+        const avail_h = if (win_height > self.y_offset + status_bar_h) win_height - self.y_offset - status_bar_h else 0;
         const total_rows = avail_h / font.cell_height;
-        self.visible_rows = if (total_rows > 2) total_rows - 2 else 1;
+        self.visible_rows = if (total_rows > 0) total_rows else 1;
 
         // Use pane width if set, otherwise full window width
         const effective_w = self.paneWidth(win_width);
@@ -797,54 +799,85 @@ pub const EditorView = struct {
         const xo = self.x_offset;
         const pw = self.paneWidth(renderer.width);
 
-        // Status bar occupies the last 2 rows: 1px separator + 1 row of text
+        // Status bar: 1px top border + cell_height + 4px vertical padding
+        const bar_pad: u32 = 4; // 2px top + 2px bottom padding
         const status_y = self.y_offset + self.visible_rows * cell_h;
-        const bar_y = status_y + 1;
 
-        // Separator line (1px)
+        // Top border (1px surface2) — subtle separator
         renderer.fillRect(xo, status_y, pw, 1, theme.surface2);
 
-        // Status bar background
-        renderer.fillRect(xo, bar_y, pw, cell_h, theme.mantle);
+        // Status bar background — fill from separator to bottom of window
+        const bar_y = status_y + 1;
+        const bar_h = if (renderer.height > bar_y) renderer.height - bar_y else cell_h + bar_pad;
+        renderer.fillRect(xo, bar_y, pw, bar_h, theme.mantle);
 
-        // -- Left section: filename + modified indicator --
+        // Text baseline — vertically centered in the bar
+        const text_y = bar_y + bar_pad / 2;
+
+        // -- Left section: git branch + file path --
         var left_col: u32 = 1; // 1-col left margin
 
-        const name = self.file_path orelse "[untitled]";
-        for (name) |ch| {
-            if (left_col >= self.visible_cols) break;
-            self.drawStatusChar(renderer, font, ch, left_col, bar_y, theme.subtext0);
+        // Git branch icon + name in lavender
+        const branch_name = if (self.git_info) |gi| gi.branchName() else "";
+        if (branch_name.len > 0) {
+            // Branch icon: U+E0A0 (Powerline branch symbol) or fallback '*'
+            const branch_icon: u32 = 0xE0A0;
+            if (font.getGlyph(branch_icon)) |glyph| {
+                const px_x = xo + left_col * cell_w;
+                const gx = @as(i32, @intCast(px_x)) + glyph.bearing_x;
+                const gy = @as(i32, @intCast(text_y)) + font.ascent - glyph.bearing_y;
+                renderer.drawGlyph(glyph, gx, gy, theme.lavender);
+            } else |_| {
+                // Fallback: draw '*' as branch indicator
+                self.drawStatusChar(renderer, font, '*', left_col, text_y, theme.lavender);
+            }
             left_col += 1;
-        }
-
-        if (self.modified) {
-            // " [+]"
-            const mod_str = " [+]";
-            for (mod_str) |ch| {
+            // Space after icon
+            left_col += 1;
+            // Branch name in lavender
+            for (branch_name) |ch| {
                 if (left_col >= self.visible_cols) break;
-                const color = if (ch == '+') theme.green else theme.subtext0;
-                self.drawStatusChar(renderer, font, ch, left_col, bar_y, color);
+                self.drawStatusChar(renderer, font, ch, left_col, text_y, theme.lavender);
+                left_col += 1;
+            }
+            // Separator
+            const sep = "  |  ";
+            for (sep) |ch| {
+                if (left_col >= self.visible_cols) break;
+                self.drawStatusChar(renderer, font, ch, left_col, text_y, theme.surface2);
                 left_col += 1;
             }
         }
 
-        // -- Right section: "branch   Lang   Ln X, Col Y   UTF-8" --
+        // File path
+        const name = self.file_path orelse "[untitled]";
+        for (name) |ch| {
+            if (left_col >= self.visible_cols) break;
+            self.drawStatusChar(renderer, font, ch, left_col, text_y, theme.subtext0);
+            left_col += 1;
+        }
+
+        if (self.modified) {
+            const mod_str = " [+]";
+            for (mod_str) |ch| {
+                if (left_col >= self.visible_cols) break;
+                const color = if (ch == '+') theme.green else theme.subtext0;
+                self.drawStatusChar(renderer, font, ch, left_col, text_y, color);
+                left_col += 1;
+            }
+        }
+
+        // -- Right section: language, line:col, encoding --
         const lang_name = self.highlighter.languageName();
-        const branch_name = if (self.git_info) |gi| gi.branchName() else "";
         var right_buf: [192]u8 = undefined;
-        const right_str = formatStatusRight(cursor_line + 1, cursor_col + 1, lang_name, branch_name, &right_buf);
+        const right_str = formatStatusRight(cursor_line + 1, cursor_col + 1, lang_name, "", &right_buf);
         const right_len: u32 = @intCast(right_str.len);
         const right_start = if (pw / cell_w > right_len + 1) pw / cell_w - right_len - 1 else 0;
 
         for (right_str, 0..) |ch, i| {
             const col = right_start + @as(u32, @intCast(i));
             if (col >= self.visible_cols) break;
-            // Highlight branch name in lavender
-            const fg = if (branch_name.len > 0 and i < branch_name.len)
-                theme.lavender
-            else
-                theme.subtext0;
-            self.drawStatusChar(renderer, font, ch, col, bar_y, fg);
+            self.drawStatusChar(renderer, font, ch, col, text_y, theme.subtext0);
         }
     }
 
@@ -1001,7 +1034,7 @@ const TabManager = @import("tabs.zig").TabManager;
 
 /// Compute the tab bar height in pixels.
 pub fn tabBarHeight(font: *const FontFace) u32 {
-    return font.cell_height + 6; // cell height + top accent (2px) + padding (4px)
+    return font.cell_height + 10; // cell height + top accent (2px) + padding (8px) — taller Zed-like tabs
 }
 
 /// Render the tab bar at the top of the window.
@@ -1012,20 +1045,19 @@ pub fn renderTabBar(
     x_start: u32,
 ) void {
     const cell_w = font.cell_width;
-    const cell_h = font.cell_height;
-    if (cell_w == 0 or cell_h == 0) return;
+    if (cell_w == 0 or font.cell_height == 0) return;
 
     const bar_h = tabBarHeight(font);
     const win_w = renderer.width;
 
-    // Full bar background
+    // Full bar background (mantle — darker than editor)
     renderer.fillRect(0, 0, win_w, bar_h, theme.mantle);
 
-    // Bottom separator
+    // Bottom separator (1px surface2)
     renderer.fillRect(0, bar_h - 1, win_w, 1, theme.surface2);
 
     // Render each tab (offset by sidebar width)
-    var x: u32 = x_start + 2;
+    var x: u32 = x_start + 4;
     for (tab_mgr.tabs.items, 0..) |tab, i| {
         const is_active = (i == tab_mgr.active);
         const bg = if (is_active) theme.base else theme.mantle;
@@ -1035,19 +1067,19 @@ pub fn renderTabBar(
         const label = if (tab.file_path) |p| basename(p) else "[untitled]";
         const label_len: u32 = @intCast(label.len);
         const mod_extra: u32 = if (tab.modified) 2 else 0; // " +"
-        const tab_w = (label_len + mod_extra + 2) * cell_w; // +2 for left/right padding
+        const tab_w = (label_len + mod_extra + 3) * cell_w; // +3 for generous horizontal padding
 
-        // Tab background (leave 1px gap at bottom for separator)
+        // Tab background (full height minus bottom separator)
         renderer.fillRect(x, 0, tab_w, bar_h - 1, bg);
 
-        // Active tab: lavender accent line at top (2px)
+        // Active tab: 2px lavender accent line at TOP
         if (is_active) {
             renderer.fillRect(x, 0, tab_w, 2, theme.lavender);
         }
 
-        // Tab label text
-        const text_y: u32 = 3; // 2px accent + 1px padding
-        var tx = x + cell_w; // 1-cell left padding
+        // Tab label text — vertically centered
+        const text_y: u32 = (bar_h - font.cell_height) / 2 + 1;
+        var tx = x + cell_w + cell_w / 2; // 1.5-cell left padding
         for (label) |ch| {
             if (font.getGlyph(ch)) |glyph| {
                 const gx: i32 = @intCast(tx);
@@ -1059,7 +1091,6 @@ pub fn renderTabBar(
 
         // Modified indicator " +" in green
         if (tab.modified) {
-            if (font.getGlyph(' ')) |_| {} else |_| {}
             tx += cell_w; // space
             if (font.getGlyph('+')) |glyph| {
                 const gx: i32 = @intCast(tx);
@@ -1068,7 +1099,7 @@ pub fn renderTabBar(
             } else |_| {}
         }
 
-        x += tab_w + 2; // 2px gap between tabs
+        x += tab_w + 1; // 1px gap between tabs
     }
 }
 

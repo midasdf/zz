@@ -39,7 +39,7 @@ pub const FontFace = struct {
         const metrics = face.*.size.*.metrics;
         const ascent: i32 = @intCast(@divTrunc(metrics.ascender, 64));
         const descent: i32 = @intCast(@divTrunc(-metrics.descender, 64));
-        const cell_height: u32 = @intCast(ascent + descent + 1);
+        const cell_height: u32 = @intCast(ascent + descent + 3); // +3 for line gap (Zed-like spacing)
 
         // Load 'M' to get cell_width for monospace
         if (c.FT_Load_Char(face, 'M', c.FT_LOAD_DEFAULT) != 0) return error.GlyphLoadFailed;

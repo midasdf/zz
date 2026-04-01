@@ -97,9 +97,11 @@ pub fn main() !void {
     var pane_mgr = try PaneManager.init(allocator, initial_view);
     defer pane_mgr.deinit();
 
-    // File tree sidebar
+    // File tree sidebar (open by default like Zed)
     var file_tree = FileTree.init(allocator, ".");
     defer file_tree.deinit();
+    file_tree.visible = true;
+    file_tree.populate() catch {};
 
     // Terminal panel
     var terminal = try Terminal.init(allocator);
@@ -176,10 +178,14 @@ pub fn main() !void {
     var mouse_dragging = false;
     var pty_registered: ?std.posix.fd_t = null; // Track registered PTY fd
 
+    // Initial layout (account for sidebar + terminal)
+    relayoutWithTerminal(&pane_mgr, &file_tree, &terminal, tab_bar_h, win.width, win.height, &font);
+
     // Initial render
     {
         const editor = tab_mgr.activeView();
         editor.lsp_diagnostics = lsp_client.diagnostics.items;
+        file_tree.active_path = if (editor.file_path) |p| p else null;
         renderFrame(&tab_mgr, &pane_mgr, &win, &font, &overlay, &file_tree, &terminal);
     }
 

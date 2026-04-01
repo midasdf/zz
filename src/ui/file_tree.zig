@@ -328,14 +328,19 @@ pub const FileTree = struct {
         const sw = self.sidebarWidth(font);
         const area_h = if (renderer.height > tab_bar_h) renderer.height - tab_bar_h else 0;
 
-        // Background
-        renderer.fillRect(0, tab_bar_h, sw, area_h, theme.crust);
+        // Background — mantle (slightly lighter than crust, closer to editor bg)
+        renderer.fillRect(0, tab_bar_h, sw, area_h, theme.mantle);
 
-        // Right separator
+        // Right border separator (1px surface2)
         renderer.fillRect(sw - 1, tab_bar_h, 1, area_h, theme.surface2);
 
+        // Top padding below tab bar (4px gap)
+        const top_pad: u32 = 4;
+        const content_y = tab_bar_h + top_pad;
+        const content_h = if (area_h > top_pad) area_h - top_pad else 0;
+
         // Visible rows
-        const max_rows = if (cell_h > 0) area_h / cell_h else 0;
+        const max_rows = if (cell_h > 0) content_h / cell_h else 0;
         if (max_rows == 0) return;
 
         // Adjust scroll if selected is out of view
@@ -353,46 +358,46 @@ pub const FileTree = struct {
             entry_idx += 1;
         }) {
             const entry = self.entries.items[entry_idx];
-            const row_y = tab_bar_h + @as(u32, @intCast(row)) * cell_h;
+            const row_y = content_y + @as(u32, @intCast(row)) * cell_h;
 
-            // Selected highlight
+            // Selected highlight — surface1 background
             const is_selected = (entry_idx == self.selected);
             if (is_selected) {
-                renderer.fillRect(0, row_y, sw - 1, cell_h, theme.surface0);
+                renderer.fillRect(0, row_y, sw - 1, cell_h, theme.surface1);
             }
 
-            // Indentation
-            const indent: u32 = @as(u32, entry.depth) * 2 * cell_w;
-            var text_x: u32 = 4 + indent; // 4px left margin
+            // Indentation — 16px per depth level
+            const indent_px: u32 = 16;
+            const indent: u32 = @as(u32, entry.depth) * indent_px;
+            var text_x: u32 = 8 + indent; // 8px left margin
 
-            // Directory icon
+            // Directory icon (▸/▾)
             if (entry.is_dir) {
-                const icon: u8 = if (entry.is_expanded) 0x76 else 0x3e; // 'v' or '>'
-                // Use triangle characters
                 const icon_cp: u32 = if (entry.is_expanded) 0x25be else 0x25b8; // "▾" or "▸"
                 if (font.getGlyph(icon_cp)) |glyph| {
                     const gx = @as(i32, @intCast(text_x)) + glyph.bearing_x;
                     const gy = @as(i32, @intCast(row_y)) + font.ascent - glyph.bearing_y;
                     renderer.drawGlyph(glyph, gx, gy, theme.overlay0);
                 } else |_| {
-                    // Fallback to ASCII
+                    // Fallback to ASCII '>' / 'v'
+                    const icon: u8 = if (entry.is_expanded) 'v' else '>';
                     if (font.getGlyph(icon)) |glyph| {
                         const gx = @as(i32, @intCast(text_x)) + glyph.bearing_x;
                         const gy = @as(i32, @intCast(row_y)) + font.ascent - glyph.bearing_y;
                         renderer.drawGlyph(glyph, gx, gy, theme.overlay0);
                     } else |_| {}
                 }
-                text_x += cell_w;
+                text_x += cell_w + 2; // icon + small gap
             } else {
-                // File: add space to align with dir names
-                text_x += cell_w;
+                // File: indent to align with directory text (past icon column)
+                text_x += cell_w + 2;
             }
 
             // Determine text color
             const fg = if (entry.is_dir)
-                theme.lavender
+                theme.lavender // directories in lavender
             else if (self.isActivePath(entry.path))
-                theme.green
+                theme.lavender // active file in lavender (not green)
             else
                 theme.text;
 
@@ -424,13 +429,15 @@ pub const FileTree = struct {
         const cell_h = font.cell_height;
         if (cell_h == 0) return null;
 
-        // Must be below tab bar
-        if (py < @as(i32, @intCast(tab_bar_h))) return null;
+        // Must be below tab bar + top padding
+        const top_pad: u32 = 4;
+        const content_start = tab_bar_h + top_pad;
+        if (py < @as(i32, @intCast(content_start))) return null;
 
         const sw = self.sidebarWidth(font);
         if (px < 0 or px >= @as(i32, @intCast(sw))) return null;
 
-        const adj_y = @as(u32, @intCast(py)) - tab_bar_h;
+        const adj_y = @as(u32, @intCast(py)) - content_start;
         const row = adj_y / cell_h;
         const entry_idx = self.scroll_offset + row;
 
