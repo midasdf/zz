@@ -430,7 +430,7 @@ pub fn main() !void {
                                         }
                                         }
                                         resetCursorBlink(editor);
-                                        updateImeCursorPosition(editor, &win, &font);
+                                        // IME position: ext_move disabled for stability
                                     } else if (terminal.focused) {
                                         // Unmapped key while terminal focused -- send raw
                                         _ = terminal.handleKey(ke.keysym, ke.modifiers.ctrl, ke.modifiers.shift);
@@ -466,7 +466,7 @@ pub fn main() !void {
                                     }
                                     lsp_needs_sync = true;
                                     resetCursorBlink(editor);
-                                    updateImeCursorPosition(editor, &win, &font);
+                                    // IME position: ext_move disabled for stability
                                     // Auto-trigger completion after . : ( @
                                     if (text.len == 1 and (text[0] == '.' or text[0] == ':' or text[0] == '(' or text[0] == '@')) {
                                         // Flush LSP sync before request so server sees latest content
