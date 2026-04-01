@@ -933,12 +933,10 @@ fn handleAction(editor: *EditorView, win: *Window, action: keymap.Action, lsp_cl
                 editor.backspace() catch {};
             }
             lsp_ops.notifyLspChange(editor, lsp_client, allocator);
-            editor.markAllDirty();
         },
         .delete => {
             editor.deleteForward() catch {};
             lsp_ops.notifyLspChange(editor, lsp_client, allocator);
-            editor.markAllDirty();
         },
         .delete_word_left => {
             editor.deleteWordLeft() catch {};
@@ -1048,7 +1046,6 @@ fn handleAction(editor: *EditorView, win: *Window, action: keymap.Action, lsp_cl
         .toggle_comment => {
             editor.toggleComment() catch {};
             lsp_ops.notifyLspChange(editor, lsp_client, allocator);
-            editor.markAllDirty();
         },
         .select_line => {
             editor.selectLine();

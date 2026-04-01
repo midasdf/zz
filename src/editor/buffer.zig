@@ -19,7 +19,6 @@ pub const PieceTable = struct {
         source: Source,
         start: u32,
         len: u32,
-        newline_count: u32,
     };
 
     pub const UndoEntry = struct {
@@ -38,7 +37,6 @@ pub const PieceTable = struct {
                 .source = .original,
                 .start = 0,
                 .len = @intCast(content.len),
-                .newline_count = countNewlines(content),
             });
         }
         return .{
@@ -62,14 +60,6 @@ pub const PieceTable = struct {
         for (self.redo_stack.items) |*entry| entry.deinit(self.allocator);
         self.redo_stack.deinit(self.allocator);
         self.line_offsets.deinit(self.allocator);
-    }
-
-    pub fn countNewlines(data: []const u8) u32 {
-        var count: u32 = 0;
-        for (data) |byte| {
-            if (byte == '\n') count += 1;
-        }
-        return count;
     }
 
     pub fn pieceContent(self: *const PieceTable, piece: Piece) []const u8 {
@@ -194,7 +184,6 @@ pub const PieceTable = struct {
             .source = .add,
             .start = add_start,
             .len = @intCast(text.len),
-            .newline_count = countNewlines(text),
         };
 
         if (self.pieces.items.len == 0) {
@@ -224,18 +213,15 @@ pub const PieceTable = struct {
             try self.pieces.insert(self.allocator, idx + 1, new_piece);
         } else {
             // Split piece: [before | new_piece | after]
-            const content = self.pieceContent(piece);
             const before = Piece{
                 .source = piece.source,
                 .start = piece.start,
                 .len = local_pos,
-                .newline_count = countNewlines(content[0..local_pos]),
             };
             const after = Piece{
                 .source = piece.source,
                 .start = piece.start + local_pos,
                 .len = piece.len - local_pos,
-                .newline_count = countNewlines(content[local_pos..]),
             };
             self.pieces.items[idx] = before;
             try self.pieces.insert(self.allocator, idx + 1, new_piece);
@@ -272,7 +258,6 @@ pub const PieceTable = struct {
                         .source = piece.source,
                         .start = piece.start,
                         .len = keep_len,
-                        .newline_count = countNewlines(self.pieceContent(piece)[0..keep_len]),
                     });
                 }
                 if (piece_end > end) {
@@ -282,7 +267,6 @@ pub const PieceTable = struct {
                         .source = piece.source,
                         .start = piece.start + skip,
                         .len = keep_len,
-                        .newline_count = countNewlines(self.pieceContent(piece)[skip..]),
                     });
                 }
             }
