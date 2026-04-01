@@ -78,6 +78,12 @@ pub const Action = enum {
     toggle_terminal,
     // Project search
     find_in_project,
+    // Symbol navigation
+    goto_symbol,
+    // Code folding
+    toggle_fold,
+    // Minimap
+    toggle_minimap,
 };
 
 pub fn modFromWindow(mods: Window.Modifiers) Modifier {
@@ -124,6 +130,8 @@ pub fn mapKey(keysym: u32, mods: Modifier) ?Action {
         if (keysym == Window.XK_Tab or keysym == Window.XK_ISO_Left_Tab) return .prev_tab;
         // Ctrl+Shift+\ (often produces | keysym) -> split horizontal
         if (keysym == Window.XK_bar or keysym == Window.XK_backslash) return .split_horizontal;
+        // Ctrl+Shift+[ -> toggle fold
+        if (keysym == Window.XK_bracketleft or keysym == '{') return .toggle_fold;
         return switch (keysym) {
             'z', 'Z' => .redo,
             'p', 'P' => .command_palette,
@@ -132,6 +140,7 @@ pub fn mapKey(keysym: u32, mods: Modifier) ?Action {
             'f', 'F' => .find_in_project,
             'i', 'I' => .format_document,
             'l', 'L' => .select_all_occurrences,
+            'o', 'O' => .goto_symbol,
             'w', 'W' => .close_pane,
             else => null,
         };

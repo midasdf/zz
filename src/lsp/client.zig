@@ -33,11 +33,18 @@ pub const FormattingEdit = struct {
     new_text: []u8, // Owned
 };
 
+pub const DocumentSymbol = struct {
+    name: []u8, // owned
+    kind: u8, // SymbolKind number
+    line: u32,
+};
+
 pub const ServerCapabilities = struct {
     has_completion: bool = false,
     has_definition: bool = false,
     has_hover: bool = false,
     has_formatting: bool = false,
+    has_document_symbols: bool = false,
 };
 
 // ── LSP Client ──────────────────────────────────────────────────────
@@ -79,11 +86,16 @@ pub const LspClient = struct {
     formatting_edits: std.ArrayList(FormattingEdit),
     has_formatting: bool,
 
+    // Pending document symbols response
+    document_symbols: std.ArrayList(DocumentSymbol),
+    has_symbols: bool,
+
     // Track pending request IDs
     pending_completion_id: ?u32,
     pending_definition_id: ?u32,
     pending_hover_id: ?u32,
     pending_formatting_id: ?u32,
+    pending_symbols_id: ?u32,
 
     pub fn init(allocator: std.mem.Allocator) LspClient {
         return .{
@@ -101,6 +113,8 @@ pub const LspClient = struct {
             .has_hover = false,
             .formatting_edits = .{},
             .has_formatting = false,
+            .document_symbols = .{},
+            .has_symbols = false,
             .read_buf = undefined,
             .read_pos = 0,
             .msg_buf = .{},
@@ -110,6 +124,7 @@ pub const LspClient = struct {
             .pending_definition_id = null,
             .pending_hover_id = null,
             .pending_formatting_id = null,
+            .pending_symbols_id = null,
         };
     }
 
@@ -180,6 +195,8 @@ pub const LspClient = struct {
         }
         self.freeFormattingEdits();
         self.formatting_edits.deinit(self.allocator);
+        self.freeDocumentSymbols();
+        self.document_symbols.deinit(self.allocator);
         self.msg_buf.deinit(self.allocator);
     }
 
@@ -272,6 +289,15 @@ pub const LspClient = struct {
         , .{uri}) catch return;
         self.pending_formatting_id = self.next_id;
         self.sendRequest("textDocument/formatting", params);
+    }
+
+    pub fn requestDocumentSymbols(self: *LspClient, uri: []const u8) void {
+        var params_buf: [1024]u8 = undefined;
+        const params = std.fmt.bufPrint(&params_buf,
+            \\{{"textDocument":{{"uri":"{s}"}}}}
+        , .{uri}) catch return;
+        self.pending_symbols_id = self.next_id;
+        self.sendRequest("textDocument/documentSymbol", params);
     }
 
     // ── Message Processing ──────────────────────────────────────────
@@ -473,6 +499,14 @@ pub const LspClient = struct {
                 return;
             }
         }
+
+        if (self.pending_symbols_id) |sid| {
+            if (id == sid) {
+                self.pending_symbols_id = null;
+                self.handleDocumentSymbolResponse(result);
+                return;
+            }
+        }
     }
 
     fn parseServerCapabilities(self: *LspClient, result: std.json.Value) void {
@@ -504,6 +538,12 @@ pub const LspClient = struct {
         }
         if (caps.get("documentFormattingProvider")) |fp| {
             self.server_capabilities.has_formatting = switch (fp) {
+                .bool => |b| b,
+                else => true,
+            };
+        }
+        if (caps.get("documentSymbolProvider")) |sp| {
+            self.server_capabilities.has_document_symbols = switch (sp) {
                 .bool => |b| b,
                 else => true,
             };
@@ -841,6 +881,121 @@ pub const LspClient = struct {
         }
     }
 
+    fn handleDocumentSymbolResponse(self: *LspClient, result: std.json.Value) void {
+        self.freeDocumentSymbols();
+        self.has_symbols = true;
+
+        // Result can be DocumentSymbol[] or SymbolInformation[]
+        const items = switch (result) {
+            .array => |a| a.items,
+            .null => return,
+            else => return,
+        };
+
+        for (items) |item_val| {
+            const item = switch (item_val) {
+                .object => |o| o,
+                else => continue,
+            };
+
+            const name_str = blk: {
+                const v = item.get("name") orelse continue;
+                break :blk switch (v) {
+                    .string => |s| s,
+                    else => continue,
+                };
+            };
+
+            const kind: u8 = @intCast(jsonGetU32(item, "kind") orelse 0);
+
+            // DocumentSymbol has "range", SymbolInformation has "location"
+            const line: u32 = blk: {
+                if (item.get("range")) |rv| {
+                    const range = switch (rv) {
+                        .object => |o| o,
+                        else => continue,
+                    };
+                    const start_val = range.get("start") orelse continue;
+                    const rs = switch (start_val) {
+                        .object => |o| o,
+                        else => continue,
+                    };
+                    break :blk jsonGetU32(rs, "line") orelse continue;
+                } else if (item.get("location")) |lv| {
+                    const loc = switch (lv) {
+                        .object => |o| o,
+                        else => continue,
+                    };
+                    const range_val = loc.get("range") orelse continue;
+                    const range = switch (range_val) {
+                        .object => |o| o,
+                        else => continue,
+                    };
+                    const start_val = range.get("start") orelse continue;
+                    const rs = switch (start_val) {
+                        .object => |o| o,
+                        else => continue,
+                    };
+                    break :blk jsonGetU32(rs, "line") orelse continue;
+                } else continue;
+            };
+
+            const owned_name = self.allocator.dupe(u8, name_str) catch continue;
+            self.document_symbols.append(self.allocator, .{
+                .name = owned_name,
+                .kind = kind,
+                .line = line,
+            }) catch {
+                self.allocator.free(owned_name);
+                continue;
+            };
+
+            // Also recurse into children (DocumentSymbol nesting)
+            if (item.get("children")) |cv| {
+                const children = switch (cv) {
+                    .array => |a| a.items,
+                    else => continue,
+                };
+                for (children) |child_val| {
+                    const child = switch (child_val) {
+                        .object => |o| o,
+                        else => continue,
+                    };
+                    const cname_str = cblk: {
+                        const v = child.get("name") orelse continue;
+                        break :cblk switch (v) {
+                            .string => |s| s,
+                            else => continue,
+                        };
+                    };
+                    const ckind: u8 = @intCast(jsonGetU32(child, "kind") orelse 0);
+                    const cline: u32 = cblk: {
+                        const crv = child.get("range") orelse continue;
+                        const crange = switch (crv) {
+                            .object => |o| o,
+                            else => continue,
+                        };
+                        const csv = crange.get("start") orelse continue;
+                        const crs = switch (csv) {
+                            .object => |o| o,
+                            else => continue,
+                        };
+                        break :cblk jsonGetU32(crs, "line") orelse continue;
+                    };
+                    const owned_cname = self.allocator.dupe(u8, cname_str) catch continue;
+                    self.document_symbols.append(self.allocator, .{
+                        .name = owned_cname,
+                        .kind = ckind,
+                        .line = cline,
+                    }) catch {
+                        self.allocator.free(owned_cname);
+                        continue;
+                    };
+                }
+            }
+        }
+    }
+
     // ── JSON-RPC Transport ──────────────────────────────────────────
 
     fn sendRequest(self: *LspClient, method: []const u8, params: []const u8) void {
@@ -952,6 +1107,13 @@ pub const LspClient = struct {
             self.allocator.free(edit.new_text);
         }
         self.formatting_edits.clearRetainingCapacity();
+    }
+
+    fn freeDocumentSymbols(self: *LspClient) void {
+        for (self.document_symbols.items) |sym| {
+            self.allocator.free(sym.name);
+        }
+        self.document_symbols.clearRetainingCapacity();
     }
 };
 

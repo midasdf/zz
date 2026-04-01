@@ -27,6 +27,7 @@ const EditorMode = enum {
     goto_line,
     project_search,
     find_replace,
+    goto_symbol,
 };
 
 const command_list = [_][]const u8{
@@ -190,6 +191,7 @@ pub fn main() !void {
 
     var running = true;
     var mouse_dragging = false;
+    var minimap_dragging = false;
     var pty_registered: ?std.posix.fd_t = null; // Track registered PTY fd
 
     // Initial layout (account for sidebar + terminal)
@@ -293,6 +295,10 @@ pub fn main() !void {
                                             .find_replace => openFindReplace(&mode, &overlay, &replace_buf, &replace_len, &replace_field_active),
                                             .goto_line => openGotoLine(&mode, &overlay),
                                             .find_in_project => openProjectSearch(&mode, &overlay, allocator, &file_list, &filtered_display, &search_results),
+                                            .goto_symbol => openGotoSymbol(&mode, &overlay, editor, &lsp_client, &filtered_display, allocator),
+                                            .toggle_fold => {
+                                                editor.toggleFold();
+                                            },
                                             .next_tab => {
                                                 tab_mgr.nextTab();
                                                 syncPaneToActiveTab(&pane_mgr, &tab_mgr);
@@ -365,6 +371,10 @@ pub fn main() !void {
                                                     handleAction(editor, &win, action, &lsp_client, allocator);
                                                 }
                                             },
+                                            .toggle_minimap => {
+                                                editor.minimap_visible = !editor.minimap_visible;
+                                                editor.markAllDirty();
+                                            },
                                             .toggle_terminal => unreachable,
                                             else => handleAction(editor, &win, action, &lsp_client, allocator),
                                         }
@@ -389,7 +399,7 @@ pub fn main() !void {
                                         }
                                     } else {
                                         overlay.appendText(te.slice());
-                                        updateOverlayResults(&mode, &overlay, allocator, file_list, &filtered_display, &search_results);
+                                        updateOverlayResults(&mode, &overlay, allocator, file_list, &filtered_display, &search_results, &lsp_client);
                                     }
                                     editor.markAllDirty();
                                 } else if (terminal.focused) {
@@ -473,11 +483,17 @@ pub fn main() !void {
                                             }
                                         }
                                         const active = pane_mgr.active_leaf;
-                                        const pos = active.pixelToPosition(me.x, me.y, &font);
-                                        active.cursor.moveTo(pos);
-                                        mouse_dragging = true;
-                                        active.markAllDirty();
-                                        resetCursorBlink(active);
+                                        // Check if click is in minimap
+                                        if (active.isInMinimap(me.x, me.y, win.width)) {
+                                            active.handleMinimapClick(me.y, &font);
+                                            minimap_dragging = true;
+                                        } else {
+                                            const pos = active.pixelToPosition(me.x, me.y, &font);
+                                            active.cursor.moveTo(pos);
+                                            mouse_dragging = true;
+                                            active.markAllDirty();
+                                            resetCursorBlink(active);
+                                        }
                                     }
                                 } else if (me.button == .middle) {
                                     win.requestPrimary();
@@ -497,6 +513,7 @@ pub fn main() !void {
                                     }
                                 } else if (me.button == .left) {
                                     mouse_dragging = false;
+                                    minimap_dragging = false;
                                     const active = pane_mgr.active_leaf;
                                     if (active.getSelectedText()) |text| {
                                         win.setClipboard(text);
@@ -510,6 +527,9 @@ pub fn main() !void {
                                         // button 32 = motion with no button held
                                         terminal.handleMouseEvent(32, cell.col, cell.row, true, true);
                                     }
+                                } else if (minimap_dragging) {
+                                    const active = pane_mgr.active_leaf;
+                                    active.handleMinimapClick(me.y, &font);
                                 } else if (mouse_dragging) {
                                     const active = pane_mgr.active_leaf;
                                     const pos = active.pixelToPosition(me.x, me.y, &font);
@@ -619,6 +639,18 @@ pub fn main() !void {
                                     active.markAllDirty();
                                 }
                             }
+                        }
+                    }
+
+                    // Handle document symbols response
+                    if (lsp_client.has_symbols) {
+                        lsp_client.has_symbols = false;
+                        if (mode == .goto_symbol) {
+                            // Refresh the overlay with new symbols
+                            freeSymbolDisplay(&filtered_display, allocator);
+                            populateSymbolDisplay(&lsp_client, &filtered_display, allocator, overlay.inputSlice());
+                            overlay.items = filtered_display.items;
+                            editor.markAllDirty();
                         }
                     }
                 },
@@ -902,7 +934,8 @@ fn handleAction(editor: *EditorView, win: *Window, action: keymap.Action, lsp_cl
         .trigger_completion, .format_document => {},
         .next_tab, .prev_tab, .close_tab => {},
         .split_vertical, .split_horizontal, .focus_next_pane, .close_pane => {},
-        .toggle_sidebar, .toggle_terminal => {},
+        .toggle_sidebar, .toggle_terminal, .toggle_minimap => {},
+        .goto_symbol, .toggle_fold => {},
     }
 }
 
@@ -1160,6 +1193,27 @@ fn openGotoLine(mode: *EditorMode, overlay: *Overlay) void {
     overlay.open("Go to Line");
 }
 
+fn openGotoSymbol(
+    mode: *EditorMode,
+    overlay: *Overlay,
+    editor: *EditorView,
+    lsp_client: *lsp.LspClient,
+    filtered_display: *std.ArrayList([]const u8),
+    _: std.mem.Allocator,
+) void {
+    mode.* = .goto_symbol;
+    overlay.open("Go to Symbol");
+    // Request document symbols from LSP
+    if (editor.file_path) |path| {
+        var uri_buf: [4096]u8 = undefined;
+        const uri = lsp.formatUri(path, &uri_buf);
+        lsp_client.requestDocumentSymbols(uri);
+    }
+    // Pre-populate with any cached symbols
+    filtered_display.clearRetainingCapacity();
+    overlay.items = filtered_display.items;
+}
+
 fn openProjectSearch(
     mode: *EditorMode,
     overlay: *Overlay,
@@ -1204,6 +1258,9 @@ fn handleOverlayKey(
     const editor = pane_mgr.active_leaf;
 
     if (keysym == window_mod.XK_Escape) {
+        if (mode.* == .goto_symbol) {
+            freeSymbolDisplay(filtered_display, allocator);
+        }
         overlay.close();
         mode.* = .normal;
         replace_field_active.* = false;
@@ -1273,6 +1330,27 @@ fn handleOverlayKey(
                 editor.markAllDirty();
                 return;
             },
+            .goto_symbol => {
+                // Jump to selected symbol's line
+                if (overlay.selectedItem()) |_| {
+                    const sel_idx = overlay.selected;
+                    if (sel_idx < filtered_display.items.len) {
+                        // Display format is "prefix name" -- extract name (after 6 chars)
+                        const display_str = filtered_display.items[sel_idx];
+                        const sym_name = if (display_str.len > 6) display_str[6..] else display_str;
+                        for (lsp_client.document_symbols.items) |sym| {
+                            if (std.mem.eql(u8, sym.name, sym_name)) {
+                                const offset = editor.buffer.lineToOffset(sym.line);
+                                editor.cursor.moveTo(offset);
+                                editor.ensureCursorVisible();
+                                break;
+                            }
+                        }
+                    }
+                }
+                // Free allocated display strings before closing
+                freeSymbolDisplay(filtered_display, allocator);
+            },
             .normal => {},
         }
         overlay.close();
@@ -1297,7 +1375,7 @@ fn handleOverlayKey(
             if (replace_len.* > 0) replace_len.* -= 1;
         } else {
             overlay.backspace();
-            updateOverlayResults(mode, overlay, allocator, file_list.*, filtered_display, search_results);
+            updateOverlayResults(mode, overlay, allocator, file_list.*, filtered_display, search_results, lsp_client);
         }
         editor.markAllDirty();
         return;
@@ -1313,12 +1391,13 @@ fn updateOverlayResults(
     file_list: ?[][]const u8,
     filtered_display: *std.ArrayList([]const u8),
     search_results: *std.ArrayList([]u8),
+    lsp_client: ?*lsp.LspClient,
 ) void {
     const query = overlay.inputSlice();
-    filtered_display.clearRetainingCapacity();
 
     switch (mode.*) {
         .file_finder => {
+            filtered_display.clearRetainingCapacity();
             if (file_list) |files| {
                 const matches = fuzzy.filter(allocator, query, files, 50) catch {
                     overlay.items = &.{};
@@ -1331,6 +1410,7 @@ fn updateOverlayResults(
             }
         },
         .command_palette => {
+            filtered_display.clearRetainingCapacity();
             const matches = fuzzy.filter(allocator, query, &command_list, 50) catch {
                 overlay.items = &.{};
                 return;
@@ -1341,6 +1421,7 @@ fn updateOverlayResults(
             }
         },
         .project_search => {
+            filtered_display.clearRetainingCapacity();
             // Free previous search results
             for (search_results.items) |r| allocator.free(r);
             search_results.clearRetainingCapacity();
@@ -1354,7 +1435,15 @@ fn updateOverlayResults(
                 }
             }
         },
-        else => {},
+        .goto_symbol => {
+            if (lsp_client) |lc| {
+                freeSymbolDisplay(filtered_display, allocator);
+                populateSymbolDisplay(lc, filtered_display, allocator, query);
+            }
+        },
+        else => {
+            filtered_display.clearRetainingCapacity();
+        },
     }
 
     overlay.items = filtered_display.items;
@@ -1804,4 +1893,57 @@ fn renderHoverTooltip(
         renderer.drawGlyph(glyph, gx, gy, text_color);
         lx += cell_w;
     }
+}
+
+// ── Go to Symbol helpers ──────────────────────────────────────────
+
+fn symbolKindPrefix(kind: u8) []const u8 {
+    return switch (kind) {
+        1 => "file ",
+        2 => "mod  ",
+        5 => "class",
+        6 => "meth ",
+        12 => "fn   ",
+        13 => "var  ",
+        14 => "const",
+        23 => "strct",
+        26 => "type ",
+        else => "     ",
+    };
+}
+
+fn populateSymbolDisplay(
+    lsp_client: *lsp.LspClient,
+    filtered_display: *std.ArrayList([]const u8),
+    allocator: std.mem.Allocator,
+    query: []const u8,
+) void {
+    filtered_display.clearRetainingCapacity();
+    // Free any previously allocated display strings
+    // (We reuse a static buffer approach: format into allocated strings)
+    for (lsp_client.document_symbols.items) |sym| {
+        // Build display string: "prefix name"
+        const prefix = symbolKindPrefix(sym.kind);
+        const display = std.fmt.allocPrint(allocator, "{s} {s}", .{ prefix, sym.name }) catch continue;
+        // Filter by query if non-empty
+        if (query.len > 0) {
+            if (!containsIgnoreCase(sym.name, query)) {
+                allocator.free(display);
+                continue;
+            }
+        }
+        filtered_display.append(allocator, display) catch {
+            allocator.free(display);
+            continue;
+        };
+    }
+}
+
+fn freeSymbolDisplay(filtered_display: *std.ArrayList([]const u8), allocator: std.mem.Allocator) void {
+    for (filtered_display.items) |item| {
+        // Only free items that were allocated (symbol display strings)
+        // They all start with a kind prefix, so they're all heap-allocated
+        allocator.free(item);
+    }
+    filtered_display.clearRetainingCapacity();
 }

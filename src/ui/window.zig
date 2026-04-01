@@ -104,6 +104,7 @@ pub const XK_F9 = 0xFFC6;
 pub const XK_F10 = 0xFFC7;
 pub const XK_F11 = 0xFFC8;
 pub const XK_F12 = 0xFFC9;
+pub const XK_bracketleft = 0x005b;
 pub const XK_backslash = 0x005c;
 pub const XK_bar = 0x007c;
 pub const XK_grave = 0x0060;

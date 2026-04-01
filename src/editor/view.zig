@@ -61,6 +61,9 @@ pub const EditorView = struct {
     y_offset: u32 = 0, // Pixel offset for tab bar
     x_offset: u32 = 0, // Pixel offset for split panes
     render_width: u32 = 0, // Pane width (0 = use renderer.width)
+    minimap_visible: bool = true,
+    minimap_width: u32 = 60, // pixels
+    folded_lines: std.AutoHashMap(u32, u32), // start_line -> end_line (exclusive)
 
     pub fn init(allocator: std.mem.Allocator, content: []const u8) !EditorView {
         var buffer = try PieceTable.init(allocator, content);
@@ -81,6 +84,7 @@ pub const EditorView = struct {
             .visible_cols = 80,
             .dirty_rows = dirty,
             .allocator = allocator,
+            .folded_lines = std.AutoHashMap(u32, u32).init(allocator),
         };
     }
 
@@ -89,6 +93,7 @@ pub const EditorView = struct {
         self.buffer.deinit();
         self.cursor.deinit();
         self.allocator.free(self.dirty_rows);
+        self.folded_lines.deinit();
         if (self.file_path) |path| {
             self.allocator.free(path);
         }
@@ -517,12 +522,13 @@ pub const EditorView = struct {
         // then track byte_offset incrementally per row.
         var byte_offset: u32 = self.buffer.lineToOffset(self.scroll_line);
 
-        // Query tree-sitter highlights for visible range
-        const vis_start = byte_offset;
-        var vis_end = vis_start;
+        // Query tree-sitter highlights for visible range (extended for minimap)
+        var query_start = byte_offset;
+        var query_end = byte_offset;
         {
+            // Compute end of visible code area
             var skip_line: u32 = 0;
-            var tmp_off = vis_start;
+            var tmp_off = byte_offset;
             while (skip_line < self.visible_rows and tmp_off < self.buffer.total_len) {
                 const sl = self.buffer.contiguousSliceAt(tmp_off);
                 if (sl.len == 0) break;
@@ -533,17 +539,64 @@ pub const EditorView = struct {
                     tmp_off += @intCast(sl.len);
                 }
             }
-            vis_end = tmp_off;
+            query_end = tmp_off;
+
+            // Extend range for minimap (which may show lines beyond viewport)
+            if (self.minimap_visible and cell_h > 0) {
+                const mm_h = self.visible_rows * cell_h;
+                const line_height: u32 = 2;
+                const max_mm_lines = mm_h / line_height;
+                if (max_mm_lines > 0) {
+                    const center = self.scroll_line + self.visible_rows / 2;
+                    const half = max_mm_lines / 2;
+                    var mm_start: u32 = 0;
+                    if (center > half) mm_start = center - half;
+                    if (mm_start + max_mm_lines > total_lines and total_lines > max_mm_lines) {
+                        mm_start = total_lines - max_mm_lines;
+                    }
+                    const mm_end = @min(mm_start + max_mm_lines, total_lines);
+
+                    // Extend query_start backwards if minimap starts before viewport
+                    if (mm_start < self.scroll_line) {
+                        query_start = self.buffer.lineToOffset(mm_start);
+                    }
+                    // Extend query_end forwards if minimap ends after viewport
+                    if (mm_end > self.scroll_line + self.visible_rows) {
+                        var ext_off = query_end;
+                        var ext_lines: u32 = 0;
+                        const extra = mm_end - (self.scroll_line + self.visible_rows);
+                        while (ext_lines < extra and ext_off < self.buffer.total_len) {
+                            const sl = self.buffer.contiguousSliceAt(ext_off);
+                            if (sl.len == 0) break;
+                            if (std.mem.indexOfScalar(u8, sl, '\n')) |nl| {
+                                ext_off += @as(u32, @intCast(nl)) + 1;
+                                ext_lines += 1;
+                            } else {
+                                ext_off += @as(u32, @intCast(sl.len));
+                            }
+                        }
+                        query_end = ext_off;
+                    }
+                }
+            }
         }
-        self.highlighter.queryRange(vis_start, vis_end);
+        self.highlighter.queryRange(query_start, query_end);
 
         // Find matching bracket position (computed once per frame)
         const match_pos = self.findMatchingBracket();
         const match_lc = if (match_pos) |mp| self.buffer.offsetToLineCol(mp) else null;
 
+        // Compute starting doc_line from scroll_line, accounting for folds.
+        // byte_offset already points to scroll_line.
         var screen_row: u32 = 0;
+        var doc_line: u32 = self.scroll_line;
         while (screen_row < self.visible_rows) : (screen_row += 1) {
-            const doc_line = self.scroll_line + screen_row;
+            // Skip folded lines (lines hidden inside a fold range)
+            while (doc_line < total_lines and self.isLineFolded(doc_line)) {
+                byte_offset = self.advancePastLine(byte_offset);
+                doc_line += 1;
+            }
+
             const row_y = self.y_offset + screen_row * cell_h;
 
             // Skip clean rows -- but we must advance byte_offset past this line
@@ -552,6 +605,7 @@ pub const EditorView = struct {
                 if (doc_line < total_lines) {
                     byte_offset = self.advancePastLine(byte_offset);
                 }
+                doc_line += 1;
                 continue;
             }
 
@@ -564,6 +618,17 @@ pub const EditorView = struct {
             // -- Gutter: line number --
             if (doc_line < total_lines) {
                 self.renderGutterNumber(renderer, font, doc_line, screen_row, is_current_line);
+            }
+
+            // -- Fold indicator in gutter --
+            if (self.folded_lines.get(doc_line)) |_| {
+                // Draw fold indicator: ">" in gutter area
+                const fold_x = xo + 2;
+                if (font.getGlyph('>')) |glyph| {
+                    const gx = @as(i32, @intCast(fold_x)) + glyph.bearing_x;
+                    const gy = @as(i32, @intCast(row_y)) + font.ascent - glyph.bearing_y;
+                    renderer.drawGlyph(glyph, gx, gy, theme.peach);
+                } else |_| {}
             }
 
             // -- Git diff gutter marker (2px bar at left edge of gutter) --
@@ -587,6 +652,27 @@ pub const EditorView = struct {
             // -- Code area --
             if (doc_line < total_lines) {
                 self.renderCodeLine(renderer, font, byte_offset, doc_line, screen_row, code_x, line_bg, has_sel);
+
+                // -- Fold ellipsis indicator at end of fold-start line --
+                if (self.folded_lines.get(doc_line)) |fold_end| {
+                    // Draw "... N lines" after line content
+                    const line_end_off = self.advancePastLine(byte_offset);
+                    const line_len_bytes = line_end_off - byte_offset;
+                    const approx_cols = @min(line_len_bytes, self.visible_cols);
+                    const ellipsis_x = code_x + self.left_pad + approx_cols * cell_w;
+                    var fold_buf: [24]u8 = undefined;
+                    const fold_count = fold_end - doc_line;
+                    const fold_str = std.fmt.bufPrint(&fold_buf, " ... {d} lines", .{fold_count}) catch "...";
+                    var fx = ellipsis_x;
+                    for (fold_str) |ch| {
+                        if (font.getGlyph(ch)) |glyph| {
+                            const gfx = @as(i32, @intCast(fx)) + glyph.bearing_x;
+                            const gfy = @as(i32, @intCast(row_y)) + font.ascent - glyph.bearing_y;
+                            renderer.drawGlyph(glyph, gfx, gfy, theme.overlay0);
+                        } else |_| {}
+                        fx += cell_w;
+                    }
+                }
 
                 // -- Diagnostic underlines --
                 self.renderDiagnostics(renderer, font, doc_line, code_x, self.y_offset + screen_row * cell_h);
@@ -634,10 +720,191 @@ pub const EditorView = struct {
             if (screen_row < self.dirty_rows.len) {
                 self.dirty_rows[screen_row] = false;
             }
+
+            doc_line += 1;
         }
+
+        // -- Minimap (code overview on right edge) --
+        self.renderMinimap(renderer, font);
 
         // -- Status bar --
         self.renderStatusBar(renderer, font, cursor_lc.line, cursor_lc.col);
+    }
+
+    // ── Minimap ────────────────────────────────────────────────────
+
+    fn renderMinimap(self: *const EditorView, renderer: *Renderer, font: *const FontFace) void {
+        if (!self.minimap_visible) return;
+
+        const cell_h = font.cell_height;
+        if (cell_h == 0) return;
+        const pw = self.paneWidth(renderer.width);
+        const mm_w = self.minimap_width;
+        if (pw <= mm_w) return; // pane too narrow
+
+        const mm_x = self.x_offset + pw - mm_w;
+        const mm_y = self.y_offset;
+        const mm_h = self.visible_rows * cell_h;
+
+        // Minimap background
+        renderer.fillRect(mm_x, mm_y, mm_w, mm_h, theme.mantle);
+
+        // Left border (1px)
+        renderer.fillRect(mm_x, mm_y, 1, mm_h, theme.surface2);
+
+        const total_lines = self.buffer.lineCount();
+        const line_height: u32 = 2; // Each doc line = 2px in minimap
+        const max_minimap_lines = mm_h / line_height;
+        if (max_minimap_lines == 0) return;
+
+        // Determine which document lines to show, centered around viewport
+        const center_line = self.scroll_line + self.visible_rows / 2;
+        const half_range = max_minimap_lines / 2;
+        var mm_start: u32 = 0;
+        if (center_line > half_range) {
+            mm_start = center_line - half_range;
+        }
+        // Clamp so we don't go past the end
+        if (mm_start + max_minimap_lines > total_lines and total_lines > max_minimap_lines) {
+            mm_start = total_lines - max_minimap_lines;
+        }
+        const mm_end = @min(mm_start + max_minimap_lines, total_lines);
+
+        // Draw viewport indicator (which lines are currently visible on screen)
+        {
+            const vp_start: u32 = if (self.scroll_line >= mm_start)
+                mm_y + (self.scroll_line - mm_start) * line_height
+            else
+                mm_y;
+            const vp_end_line = @min(self.scroll_line + self.visible_rows, mm_end);
+            const vp_end: u32 = if (vp_end_line >= mm_start)
+                mm_y + (vp_end_line - mm_start) * line_height
+            else
+                mm_y;
+            const vp_h = if (vp_end > vp_start) vp_end - vp_start else 0;
+            if (vp_h > 0) {
+                renderer.fillRect(mm_x, vp_start, mm_w, vp_h, theme.surface0);
+            }
+        }
+
+        // Walk buffer to find byte offset for mm_start line
+        var byte_offset: u32 = self.buffer.lineToOffset(mm_start);
+
+        // Usable columns inside minimap (leave 2px left padding after border)
+        const mm_pad: u32 = 3; // left padding inside minimap
+        const mm_cols = if (mm_w > mm_pad + 1) mm_w - mm_pad - 1 else 1;
+
+        // Draw each line as a thin colored strip
+        var line: u32 = mm_start;
+        while (line < mm_end) : (line += 1) {
+            const y = mm_y + (line - mm_start) * line_height;
+
+            var col: u32 = 0;
+            var off = byte_offset;
+            var hit_newline = false;
+            while (col < mm_cols and off < self.buffer.total_len) {
+                const slice = self.buffer.contiguousSliceAt(off);
+                if (slice.len == 0) break;
+                if (slice[0] == '\n') {
+                    off += 1;
+                    hit_newline = true;
+                    break;
+                }
+
+                if (slice[0] == ' ') {
+                    col += 1;
+                    off += 1;
+                } else if (slice[0] == '\t') {
+                    col += 4;
+                    off += 1;
+                } else {
+                    // Get syntax color for this position
+                    const syn = self.highlighter.getSyntaxAt(off);
+                    const fg = syntaxColor(syn);
+
+                    const px_x = mm_x + mm_pad + col;
+                    if (px_x < mm_x + mm_w) {
+                        renderer.fillRect(px_x, y, 1, line_height, fg);
+                    }
+                    col += 1;
+                    off += 1;
+
+                    // Skip continuation bytes of multi-byte UTF-8
+                    while (off < self.buffer.total_len) {
+                        const s2 = self.buffer.contiguousSliceAt(off);
+                        if (s2.len == 0) break;
+                        if ((s2[0] & 0xC0) != 0x80) break;
+                        off += 1;
+                    }
+                }
+            }
+
+            // Advance past rest of line if we stopped early (line longer than minimap)
+            if (!hit_newline) {
+                while (off < self.buffer.total_len) {
+                    const s = self.buffer.contiguousSliceAt(off);
+                    if (s.len == 0) break;
+                    if (std.mem.indexOfScalar(u8, s, '\n')) |nl| {
+                        off += @as(u32, @intCast(nl)) + 1;
+                        break;
+                    }
+                    off += @as(u32, @intCast(s.len));
+                }
+            }
+            byte_offset = off;
+        }
+    }
+
+    /// Check if a pixel coordinate is within the minimap area.
+    pub fn isInMinimap(self: *const EditorView, px: i32, py: i32, renderer_width: u32) bool {
+        if (!self.minimap_visible) return false;
+        const pw = self.paneWidth(renderer_width);
+        if (pw <= self.minimap_width) return false;
+        const mm_x = self.x_offset + pw - self.minimap_width;
+        const mm_y = self.y_offset;
+        return px >= @as(i32, @intCast(mm_x)) and
+            py >= @as(i32, @intCast(mm_y));
+    }
+
+    /// Handle a click in the minimap area: scroll to the corresponding line.
+    pub fn handleMinimapClick(self: *EditorView, py: i32, font: *const FontFace) void {
+        const cell_h = font.cell_height;
+        if (cell_h == 0) return;
+        const mm_h = self.visible_rows * cell_h;
+        const line_height: u32 = 2;
+        const max_minimap_lines = mm_h / line_height;
+        if (max_minimap_lines == 0) return;
+
+        const total_lines = self.buffer.lineCount();
+        const center_line = self.scroll_line + self.visible_rows / 2;
+        const half_range = max_minimap_lines / 2;
+        var mm_start: u32 = 0;
+        if (center_line > half_range) {
+            mm_start = center_line - half_range;
+        }
+        if (mm_start + max_minimap_lines > total_lines and total_lines > max_minimap_lines) {
+            mm_start = total_lines - max_minimap_lines;
+        }
+
+        const mm_y = self.y_offset;
+        const rel_y: u32 = if (py > @as(i32, @intCast(mm_y)))
+            @intCast(py - @as(i32, @intCast(mm_y)))
+        else
+            0;
+        const clicked_line = mm_start + rel_y / line_height;
+        const target = @min(clicked_line, total_lines -| 1);
+
+        // Scroll so the clicked line is centered in the viewport
+        if (target > self.visible_rows / 2) {
+            self.scroll_line = target - self.visible_rows / 2;
+        } else {
+            self.scroll_line = 0;
+        }
+        // Clamp scroll
+        if (self.scroll_line + self.visible_rows > total_lines) {
+            self.scroll_line = total_lines -| self.visible_rows;
+        }
+        self.markAllDirty();
     }
 
     // ── Render helpers (private) ───────────────────────────────────
@@ -1223,6 +1490,68 @@ pub const EditorView = struct {
         @memset(buf[1..][0..safe_indent], ' ');
 
         try self.insertAtCursor(buf[0 .. safe_indent + 1]);
+    }
+
+    // ── Code folding ──────────────────────────────────────────────
+
+    pub fn toggleFold(self: *EditorView) void {
+        const lc = self.buffer.offsetToLineCol(self.cursor.primary().head);
+        if (self.folded_lines.get(lc.line)) |_| {
+            // Unfold
+            _ = self.folded_lines.remove(lc.line);
+        } else {
+            // Find fold range using bracket matching
+            if (self.findFoldEnd(lc.line)) |end| {
+                if (end > lc.line) {
+                    self.folded_lines.put(lc.line, end) catch {};
+                }
+            }
+        }
+        self.markAllDirty();
+    }
+
+    fn findFoldEnd(self: *EditorView, line: u32) ?u32 {
+        // Find the opening brace/paren/bracket on this line
+        const line_start = self.buffer.lineToOffset(line);
+        const total = self.buffer.lineCount();
+        const next_line_off = if (line + 1 < total)
+            self.buffer.lineToOffset(line + 1)
+        else
+            self.buffer.total_len;
+
+        var off = line_start;
+        while (off < next_line_off) {
+            const s = self.buffer.contiguousSliceAt(off);
+            if (s.len == 0) break;
+            for (s, 0..) |byte, i| {
+                if (off + @as(u32, @intCast(i)) >= next_line_off) break;
+                if (byte == '{' or byte == '(' or byte == '[') {
+                    // Found opener -- find matching close bracket
+                    const open_pos = off + @as(u32, @intCast(i));
+                    const open = byte;
+                    const close: u8 = switch (byte) {
+                        '{' => '}',
+                        '(' => ')',
+                        '[' => ']',
+                        else => unreachable,
+                    };
+                    if (self.searchBracketForward(open_pos + 1, open, close)) |match_pos| {
+                        const match_lc = self.buffer.offsetToLineCol(match_pos);
+                        if (match_lc.line > line) return match_lc.line;
+                    }
+                }
+            }
+            off += @intCast(s.len);
+        }
+        return null;
+    }
+
+    pub fn isLineFolded(self: *const EditorView, line: u32) bool {
+        var it = self.folded_lines.iterator();
+        while (it.next()) |entry| {
+            if (line > entry.key_ptr.* and line <= entry.value_ptr.*) return true;
+        }
+        return false;
     }
 
     // ── Bracket matching ──────────────────────────────────────────
