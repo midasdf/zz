@@ -125,6 +125,15 @@ zig build -Doptimize=ReleaseFast  # Release build (3.1MB)
 | Ctrl+Shift+\\ | Split horizontal |
 | Ctrl+B | Toggle file tree |
 | Ctrl+\` | Toggle terminal |
+| **Search** | |
+| Ctrl+Shift+F | Search in project |
+| Ctrl+H | Find & replace |
+| **Code** | |
+| Ctrl+Space | Trigger completion |
+| Ctrl+Shift+I | Format document |
+| Ctrl+Shift+D | Duplicate line |
+| Alt+Up / Down | Move line up / down |
+| Ctrl+Shift+K | Delete line |
 
 ## Architecture
 
@@ -155,7 +164,7 @@ src/
     └── keymap.zig        Keybind mapping
 ```
 
-**~10,300 lines of Zig. Zero external Zig dependencies.**
+**~12,000 lines of Zig. Zero external Zig dependencies.**
 
 All rendering is CPU-based (xcb shared memory). No GPU, no OpenGL, no Wayland (yet). Single-threaded epoll event loop. The only subprocess communication is with LSP servers (JSON-RPC over stdin/stdout) and the embedded terminal (PTY).
 
@@ -163,12 +172,12 @@ All rendering is CPU-based (xcb shared memory). No GPU, no OpenGL, no Wayland (y
 
 | Metric | Value |
 |--------|-------|
-| Binary (ReleaseFast) | 3.1 MB |
+| Binary (ReleaseFast) | 3.3 MB |
 | Binary (ReleaseSmall + strip) | ~240 KB |
 | Memory (RSS) | ~18 MB |
 | Idle CPU | 0% |
 | Startup time | Instant (mmap + single piece) |
-| Source lines | ~10,300 |
+| Source lines | ~12,000 |
 | Dependencies (Zig packages) | 0 |
 
 ## License
