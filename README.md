@@ -1,5 +1,7 @@
 # zz
 
+> **WIP** — This project is under active development. Expect bugs, missing features, and breaking changes.
+
 A lightweight, fast code editor written in Zig. No AI, no telemetry, no bloat.
 
 ```
