@@ -830,6 +830,11 @@ pub const Window = struct {
     fn processXcbKeyPress(self: *Window, xcb_keycode: u32, mods: Modifiers) ?Event {
         const keysym = self.getKeysym(xcb_keycode);
 
+        // Suppress IME toggle keys (Shift+Space) — don't produce text
+        if (keysym == 0x0020 and mods.shift and !mods.ctrl and !mods.alt) {
+            return null;
+        }
+
         // Special keys -> KeyEvent
         if (isSpecialKeysym(keysym)) {
             return .{ .key_press = .{ .keysym = keysym, .modifiers = mods } };
