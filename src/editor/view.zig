@@ -667,30 +667,22 @@ pub const EditorView = struct {
             if (e > search_from) search_from = e;
         }
 
-        const content = self.buffer.collectContent(self.allocator) catch return;
-        defer self.allocator.free(content);
-
         const sel_len: u32 = @intCast(selected.len);
 
-        // Search forward from last cursor
-        if (search_from < content.len) {
-            if (std.mem.indexOf(u8, content[search_from..], selected)) |pos| {
-                const abs_pos: u32 = @intCast(search_from + pos);
-                // Check not already a cursor at this position
-                if (!self.hasCursorAt(abs_pos, abs_pos + sel_len)) {
-                    try self.cursor.addSelection(.{
-                        .anchor = abs_pos,
-                        .head = abs_pos + sel_len,
-                    });
-                    self.markAllDirty();
-                    return;
-                }
+        // Search forward from last cursor using piece-table indexOf
+        if (self.buffer.indexOf(selected, search_from)) |abs_pos| {
+            if (!self.hasCursorAt(abs_pos, abs_pos + sel_len)) {
+                try self.cursor.addSelection(.{
+                    .anchor = abs_pos,
+                    .head = abs_pos + sel_len,
+                });
+                self.markAllDirty();
+                return;
             }
         }
 
         // Wrap around: search from beginning
-        if (std.mem.indexOf(u8, content, selected)) |pos| {
-            const abs_pos: u32 = @intCast(pos);
+        if (self.buffer.indexOf(selected, 0)) |abs_pos| {
             if (!self.hasCursorAt(abs_pos, abs_pos + sel_len)) {
                 try self.cursor.addSelection(.{
                     .anchor = abs_pos,
@@ -712,24 +704,18 @@ pub const EditorView = struct {
         defer self.allocator.free(selected);
         if (selected.len == 0) return;
 
-        const content = self.buffer.collectContent(self.allocator) catch return;
-        defer self.allocator.free(content);
-
         const sel_len: u32 = @intCast(selected.len);
 
-        // Clear all cursors and re-add for every occurrence
+        // Clear all cursors and re-add for every occurrence using piece-table indexOf
         self.cursor.cursors.clearRetainingCapacity();
 
-        var search_pos: usize = 0;
-        while (search_pos < content.len) {
-            if (std.mem.indexOf(u8, content[search_pos..], selected)) |pos| {
-                const abs_pos: u32 = @intCast(search_pos + pos);
-                self.cursor.cursors.append(self.allocator, .{
-                    .anchor = abs_pos,
-                    .head = abs_pos + sel_len,
-                }) catch break;
-                search_pos = search_pos + pos + selected.len;
-            } else break;
+        var search_pos: u32 = 0;
+        while (self.buffer.indexOf(selected, search_pos)) |abs_pos| {
+            self.cursor.cursors.append(self.allocator, .{
+                .anchor = abs_pos,
+                .head = abs_pos + sel_len,
+            }) catch break;
+            search_pos = abs_pos + sel_len;
         }
 
         // Ensure at least one cursor
@@ -1921,9 +1907,8 @@ pub const EditorView = struct {
         const line_len = next_line - line_start;
         if (line_len == 0) return;
 
-        const content = self.buffer.collectContent(self.allocator) catch return;
-        defer self.allocator.free(content);
-        const line_text = content[line_start..next_line];
+        const line_text = self.buffer.extractRange(self.allocator, line_start, next_line) catch return;
+        defer self.allocator.free(line_text);
 
         // If this is the last line (no trailing newline), prepend one
         const needs_newline = (next_line == self.buffer.total_len and (line_text.len == 0 or line_text[line_text.len - 1] != '\n'));
@@ -1959,9 +1944,7 @@ pub const EditorView = struct {
         const prev_start = self.buffer.lineToOffset(lc.line - 1);
 
         // Get this line's text
-        const content = self.buffer.collectContent(self.allocator) catch return;
-        defer self.allocator.free(content);
-        const this_line = self.allocator.dupe(u8, content[this_start..this_end]) catch return;
+        const this_line = self.buffer.extractRange(self.allocator, this_start, this_end) catch return;
         defer self.allocator.free(this_line);
 
         // Delete this line, then insert before previous line
@@ -1991,11 +1974,9 @@ pub const EditorView = struct {
             self.buffer.total_len;
 
         // Get this line's text and next line's text
-        const content = self.buffer.collectContent(self.allocator) catch return;
-        defer self.allocator.free(content);
-        const this_line = self.allocator.dupe(u8, content[this_start..this_end]) catch return;
+        const this_line = self.buffer.extractRange(self.allocator, this_start, this_end) catch return;
         defer self.allocator.free(this_line);
-        const next_line_text = self.allocator.dupe(u8, content[this_end..next_end]) catch return;
+        const next_line_text = self.buffer.extractRange(self.allocator, this_end, next_end) catch return;
         defer self.allocator.free(next_line_text);
 
         // Delete both lines (from this_start to next_end)

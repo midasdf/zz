@@ -326,6 +326,62 @@ pub const PieceTable = struct {
         return "";
     }
 
+    /// Search for `needle` in the buffer starting at `start`, without allocating.
+    /// Returns the byte offset of the first match, or null.
+    pub fn indexOf(self: *const PieceTable, needle: []const u8, start: u32) ?u32 {
+        if (needle.len == 0) return null;
+        const nlen: u32 = @intCast(needle.len);
+        var off = start;
+        while (off + nlen <= self.total_len) {
+            const slice = self.contiguousSliceAt(off);
+            if (slice.len == 0) break;
+
+            // How many candidate positions can start within this contiguous run
+            const search_end: u32 = @intCast(@min(slice.len, self.total_len - off - nlen + 1));
+            for (slice[0..search_end], 0..) |ch, i| {
+                if (ch == needle[0]) {
+                    const candidate = off + @as(u32, @intCast(i));
+                    if (self.matchAt(candidate, needle)) return candidate;
+                }
+            }
+            off += @intCast(search_end);
+            if (search_end == 0) off += 1;
+        }
+        return null;
+    }
+
+    /// Check if `needle` matches at the given byte offset, across piece boundaries.
+    fn matchAt(self: *const PieceTable, off: u32, needle: []const u8) bool {
+        var qi: u32 = 0;
+        while (qi < needle.len) {
+            const slice = self.contiguousSliceAt(off + qi);
+            if (slice.len == 0) return false;
+            const check_len: u32 = @intCast(@min(slice.len, needle.len - qi));
+            if (!std.mem.eql(u8, slice[0..check_len], needle[qi..][0..check_len])) return false;
+            qi += check_len;
+        }
+        return true;
+    }
+
+    /// Extract content between two byte offsets into an allocated slice.
+    /// Much cheaper than collectContent when you only need a portion of the buffer.
+    pub fn extractRange(self: *const PieceTable, allocator: std.mem.Allocator, start: u32, end: u32) ![]u8 {
+        if (end <= start) return try allocator.alloc(u8, 0);
+        const len = end - start;
+        const result = try allocator.alloc(u8, len);
+        var write_pos: u32 = 0;
+        var off = start;
+        while (off < end) {
+            const slice = self.contiguousSliceAt(off);
+            if (slice.len == 0) break;
+            const copy_len: u32 = @intCast(@min(slice.len, end - off));
+            @memcpy(result[write_pos..][0..copy_len], slice[0..copy_len]);
+            write_pos += copy_len;
+            off += copy_len;
+        }
+        return result[0..write_pos];
+    }
+
     // --- Line/offset conversion ---
 
     pub fn lineToOffset(self: *const PieceTable, target_line: u32) u32 {

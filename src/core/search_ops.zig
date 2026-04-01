@@ -86,29 +86,21 @@ pub fn parseSearchResult(result: []const u8) ?ParsedSearchResult {
 }
 
 /// Find the next occurrence of query in the editor buffer, wrapping around.
+/// Uses PieceTable.indexOf to avoid allocating the entire buffer.
 pub fn findNext(editor: *EditorView, query: []const u8) void {
     if (query.len == 0) return;
-    const content = editor.buffer.collectContent(editor.allocator) catch return;
-    defer editor.allocator.free(content);
-
-    const cursor_pos = editor.cursor.primary().head;
-    const start: usize = @min(@as(usize, cursor_pos) + 1, content.len);
+    const start: u32 = @min(editor.cursor.primary().head + 1, editor.buffer.total_len);
+    const qlen: u32 = @intCast(query.len);
 
     // Search forward from cursor
-    if (start < content.len) {
-        if (std.mem.indexOf(u8, content[start..], query)) |pos| {
-            const abs_pos: u32 = @intCast(start + pos);
-            const end_pos: u32 = abs_pos + @as(u32, @intCast(query.len));
-            editor.cursor.cursors.items[0] = .{ .anchor = abs_pos, .head = end_pos };
-            editor.ensureCursorVisible();
-            return;
-        }
+    if (editor.buffer.indexOf(query, start)) |pos| {
+        editor.cursor.cursors.items[0] = .{ .anchor = pos, .head = pos + qlen };
+        editor.ensureCursorVisible();
+        return;
     }
-    // Wrap around
-    if (std.mem.indexOf(u8, content, query)) |pos| {
-        const abs_pos: u32 = @intCast(pos);
-        const end_pos: u32 = abs_pos + @as(u32, @intCast(query.len));
-        editor.cursor.cursors.items[0] = .{ .anchor = abs_pos, .head = end_pos };
+    // Wrap around: search from beginning
+    if (editor.buffer.indexOf(query, 0)) |pos| {
+        editor.cursor.cursors.items[0] = .{ .anchor = pos, .head = pos + qlen };
         editor.ensureCursorVisible();
     }
 }
