@@ -438,16 +438,11 @@ pub const Window = struct {
     }
 
     /// Update IME candidate window position to follow the cursor.
+    /// Uses ext_move only (lightweight, non-blocking, no side effects).
     pub fn updateImeCursorPos(self: *Window, x: i32, y: i32) void {
         if (self.xim) |xim| {
             if (self.xim_connected and self.xic != 0) {
-                // Update spot location via nested list (standard XIM way)
-                const spot = c.xcb_point_t{ .x = @intCast(x), .y = @intCast(y) };
-                const nested = c.xcb_xim_create_nested_list(xim, c.XCB_XIM_XNSpotLocation, &spot, @as(?*anyopaque, null));
-                if (nested.data != null) {
-                    _ = c.xcb_xim_set_ic_values(xim, self.xic, null, null, c.XCB_XIM_XNPreeditAttributes, &nested, @as(?*anyopaque, null));
-                    std.c.free(nested.data);
-                }
+                _ = c.xcb_xim_ext_move(xim, self.xic, @intCast(x), @intCast(y));
             }
         }
     }
@@ -1036,11 +1031,9 @@ pub const Window = struct {
         const self: *Window = @ptrCast(@alignCast(user_data));
         self.xim_connected = true;
 
-        // XIMPreeditPosition: IME shows preedit near the spot location
-        const input_style: u32 = 0x0004 | 0x0400; // XIMPreeditPosition | XIMStatusNothing
-        const spot = c.xcb_point_t{ .x = 0, .y = 0 };
-        const nested = c.xcb_xim_create_nested_list(xim, c.XCB_XIM_XNSpotLocation, &spot, @as(?*anyopaque, null));
-        defer std.c.free(nested.data);
+        // PreeditNothing: most compatible, no unexpected preedit events
+        // Position controlled via ext_move only (lightweight)
+        const input_style: u32 = 0x0008 | 0x0400; // XIMPreeditNothing | XIMStatusNothing
         _ = c.xcb_xim_create_ic(
             xim,
             ximCreateIcCallback,
@@ -1051,8 +1044,6 @@ pub const Window = struct {
             &self.window,
             c.XCB_XIM_XNFocusWindow,
             &self.window,
-            c.XCB_XIM_XNPreeditAttributes,
-            &nested,
             @as(?*anyopaque, null),
         );
     }
