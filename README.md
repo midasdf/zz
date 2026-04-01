@@ -24,7 +24,7 @@ A lightweight, fast code editor written in Zig. No AI, no telemetry, no bloat.
 
 - **VS Code / Zed**: Feature-rich but heavy, ships AI and telemetry
 - **Neovim / Helix**: Fast but no native GUI, no mouse-first UX
-- **zz**: Fast GUI editor with zero telemetry. 3MB binary, 13MB RAM, idle CPU 0%
+- **zz**: Fast GUI editor with zero telemetry. 3MB binary, 18MB RAM, idle CPU 0%
 
 ## Features
 
@@ -128,7 +128,7 @@ zig build -Doptimize=ReleaseFast  # Release build (3.1MB)
 
 ```
 src/
-├── main.zig              Event loop, mode dispatch (1165 lines)
+├── main.zig              Event loop, mode dispatch
 ├── editor/
 │   ├── buffer.zig        Piece Table with undo/redo
 │   ├── cursor.zig        Multi-cursor, UTF-8 movement
@@ -153,7 +153,7 @@ src/
     └── keymap.zig        Keybind mapping
 ```
 
-**10,200 lines of Zig. Zero external Zig dependencies.**
+**~10,300 lines of Zig. Zero external Zig dependencies.**
 
 All rendering is CPU-based (xcb shared memory). No GPU, no OpenGL, no Wayland (yet). Single-threaded epoll event loop. The only subprocess communication is with LSP servers (JSON-RPC over stdin/stdout) and the embedded terminal (PTY).
 
@@ -162,11 +162,11 @@ All rendering is CPU-based (xcb shared memory). No GPU, no OpenGL, no Wayland (y
 | Metric | Value |
 |--------|-------|
 | Binary (ReleaseFast) | 3.1 MB |
-| Binary (ReleaseSmall + strip) | ~100 KB |
-| Memory (RSS) | ~13 MB |
+| Binary (ReleaseSmall + strip) | ~240 KB |
+| Memory (RSS) | ~18 MB |
 | Idle CPU | 0% |
 | Startup time | Instant (mmap + single piece) |
-| Source lines | 10,200 |
+| Source lines | ~10,300 |
 | Dependencies (Zig packages) | 0 |
 
 ## License
