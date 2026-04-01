@@ -436,6 +436,15 @@ pub const Window = struct {
         self.dirty_y_max = self.height;
     }
 
+    /// Update IME candidate window position to follow the cursor.
+    pub fn updateImeCursorPos(self: *Window, x: i32, y: i32) void {
+        if (self.xim) |xim| {
+            if (self.xim_connected and self.xic != 0) {
+                _ = c.xcb_xim_ext_move(xim, self.xic, @intCast(x), @intCast(y));
+            }
+        }
+    }
+
     // ── Present (SHM put_image for dirty region, then swap buffers) ──
 
     pub fn present(self: *Window) void {
