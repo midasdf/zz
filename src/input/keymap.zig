@@ -120,6 +120,9 @@ pub const Action = enum {
     // Sort lines
     sort_lines_asc,
     sort_lines_desc,
+    // Diagnostics
+    next_diagnostic,
+    prev_diagnostic,
 };
 
 pub fn modFromWindow(mods: Window.Modifiers) Modifier {
@@ -226,6 +229,7 @@ pub fn mapKey(keysym: u32, mods: Modifier) ?Action {
             Window.XK_Home => .select_home,
             Window.XK_End => .select_end,
             Window.XK_F12 => .goto_references,
+            Window.XK_F8 => .prev_diagnostic,
             else => null,
         };
     }
@@ -246,6 +250,7 @@ pub fn mapKey(keysym: u32, mods: Modifier) ?Action {
         Window.XK_Tab => .tab,
         Window.XK_Escape => .escape,
         Window.XK_F2 => .rename_symbol,
+        Window.XK_F8 => .next_diagnostic,
         Window.XK_F11 => .hover,
         Window.XK_F12 => .goto_definition,
         else => null,

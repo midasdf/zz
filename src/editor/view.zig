@@ -2821,6 +2821,117 @@ pub const EditorView = struct {
         self.modified = true;
         self.markAllDirty();
     }
+
+    // ── Diagnostic navigation ────────────────────────────────────
+
+    pub fn gotoNextDiagnostic(self: *EditorView) void {
+        if (self.lsp_diagnostics.len == 0) return;
+        const cursor_line = self.buffer.offsetToLineCol(self.cursor.primary().head).line;
+
+        // Find first diagnostic after cursor line
+        for (self.lsp_diagnostics) |d| {
+            if (d.line > cursor_line) {
+                const offset = self.buffer.lineToOffset(d.line) + d.col_start;
+                self.cursor.moveTo(@min(offset, self.buffer.total_len));
+                self.ensureCursorVisible();
+                self.markAllDirty();
+                return;
+            }
+        }
+        // Wrap to first diagnostic
+        const d = self.lsp_diagnostics[0];
+        const offset = self.buffer.lineToOffset(d.line) + d.col_start;
+        self.cursor.moveTo(@min(offset, self.buffer.total_len));
+        self.ensureCursorVisible();
+        self.markAllDirty();
+    }
+
+    pub fn gotoPrevDiagnostic(self: *EditorView) void {
+        if (self.lsp_diagnostics.len == 0) return;
+        const cursor_line = self.buffer.offsetToLineCol(self.cursor.primary().head).line;
+
+        // Find last diagnostic before cursor line
+        var i: usize = self.lsp_diagnostics.len;
+        while (i > 0) {
+            i -= 1;
+            if (self.lsp_diagnostics[i].line < cursor_line) {
+                const d = self.lsp_diagnostics[i];
+                const offset = self.buffer.lineToOffset(d.line) + d.col_start;
+                self.cursor.moveTo(@min(offset, self.buffer.total_len));
+                self.ensureCursorVisible();
+                self.markAllDirty();
+                return;
+            }
+        }
+        // Wrap to last diagnostic
+        const d = self.lsp_diagnostics[self.lsp_diagnostics.len - 1];
+        const offset = self.buffer.lineToOffset(d.line) + d.col_start;
+        self.cursor.moveTo(@min(offset, self.buffer.total_len));
+        self.ensureCursorVisible();
+        self.markAllDirty();
+    }
+
+    // ── Text case transformation ─────────────────────────────────
+
+    pub const CaseMode = enum { upper, lower, title };
+
+    pub fn transformCase(self: *EditorView, mode: CaseMode) !void {
+        const sel = self.cursor.primary();
+        if (!sel.hasSelection()) return;
+
+        const start = sel.start();
+        const len = sel.end() - start;
+
+        // Get selected text via contiguous slices
+        var transformed = try self.allocator.alloc(u8, len);
+        defer self.allocator.free(transformed);
+        var written: usize = 0;
+        var offset: u32 = start;
+        while (offset < sel.end()) {
+            const slice = self.buffer.contiguousSliceAt(offset);
+            if (slice.len == 0) break;
+            const remaining: usize = @intCast(sel.end() - offset);
+            const take = @min(slice.len, remaining);
+            @memcpy(transformed[written..][0..take], slice[0..take]);
+            written += take;
+            offset += @intCast(take);
+        }
+        const text = transformed[0..written];
+
+        switch (mode) {
+            .upper => {
+                for (text) |*ch| {
+                    if (ch.* >= 'a' and ch.* <= 'z') ch.* -= 32;
+                }
+            },
+            .lower => {
+                for (text) |*ch| {
+                    if (ch.* >= 'A' and ch.* <= 'Z') ch.* += 32;
+                }
+            },
+            .title => {
+                var word_start = true;
+                for (text) |*ch| {
+                    if (ch.* >= 'a' and ch.* <= 'z' and word_start) {
+                        ch.* -= 32;
+                        word_start = false;
+                    } else if (ch.* >= 'A' and ch.* <= 'Z' and !word_start) {
+                        ch.* += 32;
+                        word_start = false;
+                    } else {
+                        word_start = (ch.* == ' ' or ch.* == '\t' or ch.* == '\n' or ch.* == '_' or ch.* == '-');
+                    }
+                }
+            },
+        }
+
+        // Replace selection with transformed text
+        try self.buffer.delete(start, len);
+        try self.buffer.insert(start, text);
+        self.cursor.cursors.items[0] = .{ .anchor = start, .head = start + len };
+        self.modified = true;
+        self.markAllDirty();
+    }
 };
 
 // ── Tab bar rendering ─────────────────────────────────────────────

@@ -90,6 +90,45 @@ pub const TabManager = struct {
         }
     }
 
+    /// Close all tabs except the active one.
+    pub fn closeOthers(self: *TabManager) void {
+        if (self.tabs.items.len <= 1) return;
+        const active_view = self.tabs.items[self.active];
+        // Remove all except active (back-to-front)
+        var i = self.tabs.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (i != self.active) {
+                const tab = self.tabs.orderedRemove(i);
+                tab.deinit();
+                self.allocator.destroy(tab);
+            }
+        }
+        _ = active_view;
+        self.active = 0; // Only one tab left
+    }
+
+    /// Close all tabs and create a new empty one.
+    pub fn closeAll(self: *TabManager) void {
+        for (self.tabs.items) |tab| {
+            tab.deinit();
+            self.allocator.destroy(tab);
+        }
+        self.tabs.clearRetainingCapacity();
+        // Create a new empty tab
+        const new_view = self.allocator.create(EditorView) catch return;
+        new_view.* = EditorView.init(self.allocator, "") catch {
+            self.allocator.destroy(new_view);
+            return;
+        };
+        self.tabs.append(self.allocator, new_view) catch {
+            new_view.deinit();
+            self.allocator.destroy(new_view);
+            return;
+        };
+        self.active = 0;
+    }
+
     /// Number of open tabs.
     pub fn count(self: *const TabManager) usize {
         return self.tabs.items.len;

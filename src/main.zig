@@ -52,6 +52,11 @@ const command_list = [_][]const u8{
     "Theme: Gruvbox Dark",
     "Theme: One Dark",
     "Theme: Cycle Next",
+    "Transform: UPPER CASE",
+    "Transform: lower case",
+    "Transform: Title Case",
+    "Tab: Close Other Tabs",
+    "Tab: Close All Tabs",
 };
 
 const font_path = "/usr/share/fonts/PlemolJP/PlemolJPConsoleNF-Regular.ttf";
@@ -1093,6 +1098,12 @@ fn handleAction(editor: *EditorView, win: *Window, action: keymap.Action, lsp_cl
             editor.shrinkSelection();
         },
         .sort_lines_asc, .sort_lines_desc => {},
+        .next_diagnostic => {
+            editor.gotoNextDiagnostic();
+        },
+        .prev_diagnostic => {
+            editor.gotoPrevDiagnostic();
+        },
         .switch_theme => {
             view_mod.cycleTheme();
             editor.markAllDirty();
@@ -1611,7 +1622,7 @@ fn handleOverlayKey(
             },
             .command_palette => {
                 if (overlay.selectedItem()) |cmd_name| {
-                    executeCommand(cmd_name, editor);
+                    executeCommand(cmd_name, editor, tab_mgr, pane_mgr, git_info);
                 }
             },
             .project_search => {
@@ -2028,7 +2039,7 @@ fn fileBasename(path: []const u8) []const u8 {
 
 // ── Execute a command palette command ─────────────────────────────
 
-fn executeCommand(cmd_name: []const u8, editor: *EditorView) void {
+fn executeCommand(cmd_name: []const u8, editor: *EditorView, tab_mgr: *TabManager, pane_mgr: *PaneManager, git_info: ?*GitInfo) void {
     if (std.mem.eql(u8, cmd_name, "File: Save")) {
         saveFile(editor);
     } else if (std.mem.eql(u8, cmd_name, "Edit: Undo")) {
@@ -2061,6 +2072,22 @@ fn executeCommand(cmd_name: []const u8, editor: *EditorView) void {
         editor.sortSelectedLines(false) catch {};
     } else if (std.mem.eql(u8, cmd_name, "Edit: Sort Lines (Descending)")) {
         editor.sortSelectedLines(true) catch {};
+    } else if (std.mem.eql(u8, cmd_name, "Transform: UPPER CASE")) {
+        editor.transformCase(.upper) catch {};
+    } else if (std.mem.eql(u8, cmd_name, "Transform: lower case")) {
+        editor.transformCase(.lower) catch {};
+    } else if (std.mem.eql(u8, cmd_name, "Transform: Title Case")) {
+        editor.transformCase(.title) catch {};
+    } else if (std.mem.eql(u8, cmd_name, "Tab: Close Other Tabs")) {
+        tab_mgr.closeOthers();
+        syncPaneToActiveTab(pane_mgr, tab_mgr);
+        if (git_info) |gi| recomputeGitDiff(gi, tab_mgr.activeView());
+        tab_mgr.activeView().markAllDirty();
+    } else if (std.mem.eql(u8, cmd_name, "Tab: Close All Tabs")) {
+        tab_mgr.closeAll();
+        syncPaneToActiveTab(pane_mgr, tab_mgr);
+        if (git_info) |gi| recomputeGitDiff(gi, tab_mgr.activeView());
+        tab_mgr.activeView().markAllDirty();
     }
     // Other commands (Copy, Cut, Paste, Open, Find, Go to Line) require
     // additional context (window for clipboard, overlay for sub-modes).
