@@ -1919,7 +1919,13 @@ fn handleTabBarClick(tab_mgr: *TabManager, click_x: i32, font: *const FontFace, 
             if (click_x >= close_region_start) {
                 // Close this tab
                 tab_mgr.closeTab(i);
-                tab_mgr.activeView().markAllDirty();
+                // Ensure the active view has proper y_offset after close
+                const view = tab_mgr.activeView();
+                if (view.y_offset == 0) {
+                    view.y_offset = view_mod.tabBarHeight(font);
+                }
+                view.markAllDirty();
+                // Note: caller (main event loop) calls syncPaneToActiveTab after this
             } else {
                 // Switch to this tab
                 tab_mgr.switchTo(i);

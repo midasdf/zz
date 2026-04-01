@@ -43,10 +43,19 @@ pub const TabManager = struct {
         if (idx >= self.tabs.items.len) return;
 
         if (self.tabs.items.len <= 1) {
-            // Last tab: replace with empty buffer instead of refusing to close
+            // Last tab: reset buffer to empty instead of closing
             const tab = self.tabs.items[0];
-            tab.deinit();
-            tab.* = EditorView.init(self.allocator, "") catch return;
+            // Reset buffer (preserves EditorView struct identity for pane_mgr)
+            tab.buffer.deinit();
+            tab.buffer = @import("buffer.zig").PieceTable.init(self.allocator, "") catch return;
+            tab.cursor.moveTo(0);
+            tab.scroll_line = 0;
+            tab.modified = false;
+            if (tab.file_path) |p| self.allocator.free(p);
+            tab.file_path = null;
+            tab.highlighter.setLanguage(null);
+            tab.highlighter.parse(&tab.buffer);
+            tab.markAllDirty();
             return;
         }
 
