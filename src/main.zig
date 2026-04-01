@@ -1904,20 +1904,31 @@ fn handleTabBarClick(tab_mgr: *TabManager, click_x: i32, font: *const FontFace, 
     const cell_w = font.cell_width;
     if (cell_w == 0) return;
 
-    var x: u32 = sidebar_w + 2;
+    var x: u32 = sidebar_w + 4;
     for (tab_mgr.tabs.items, 0..) |tab, i| {
         const label = if (tab.file_path) |p| fileBasename(p) else "[untitled]";
         const label_len: u32 = @intCast(label.len);
         const mod_extra: u32 = if (tab.modified) 2 else 0;
-        const tab_w = (label_len + mod_extra + 2) * cell_w;
+        const close_btn_w: u32 = cell_w + cell_w / 2;
+        const tab_w = (label_len + mod_extra + 3) * cell_w + close_btn_w;
 
-        if (click_x >= @as(i32, @intCast(x)) and click_x < @as(i32, @intCast(x + tab_w))) {
-            tab_mgr.switchTo(i);
-            tab_mgr.activeView().markAllDirty();
+        const tab_x: i32 = @intCast(x);
+        if (click_x >= tab_x and click_x < tab_x + @as(i32, @intCast(tab_w))) {
+            // Check if click is on the × close button (right portion of tab)
+            const close_region_start = tab_x + @as(i32, @intCast(tab_w - close_btn_w));
+            if (click_x >= close_region_start) {
+                // Close this tab
+                tab_mgr.closeTab(i);
+                tab_mgr.activeView().markAllDirty();
+            } else {
+                // Switch to this tab
+                tab_mgr.switchTo(i);
+                tab_mgr.activeView().markAllDirty();
+            }
             return;
         }
 
-        x += tab_w + 2;
+        x += tab_w + 1;
     }
 }
 

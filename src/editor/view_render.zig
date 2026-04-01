@@ -1039,7 +1039,8 @@ pub fn renderTabBar(
         const label = if (tab.file_path) |p| basename(p) else "[untitled]";
         const label_len: u32 = @intCast(label.len);
         const mod_extra: u32 = if (tab.modified) 2 else 0; // " +"
-        const tab_w = (label_len + mod_extra + 3) * cell_w; // +3 for generous horizontal padding
+        const close_btn_w: u32 = cell_w + cell_w / 2; // Space for × button
+        const tab_w = (label_len + mod_extra + 3) * cell_w + close_btn_w;
 
         // Tab background (full height minus bottom separator)
         renderer.fillRect(x, 0, tab_w, bar_h - 1, bg);
@@ -1068,6 +1069,17 @@ pub fn renderTabBar(
                 const gx: i32 = @intCast(tx);
                 const gy: i32 = @as(i32, @intCast(text_y)) + font.ascent - @as(i32, glyph.bearing_y);
                 renderer.drawGlyph(glyph, gx, gy, active_theme.green);
+            } else |_| {}
+        }
+
+        // Close button "×" — right side of tab
+        {
+            const close_x = x + tab_w - close_btn_w;
+            const close_fg = if (is_active) active_theme.overlay0 else active_theme.surface2;
+            if (font.getGlyph('x')) |glyph| {
+                const gx: i32 = @intCast(close_x + cell_w / 4);
+                const gy: i32 = @as(i32, @intCast(text_y)) + font.ascent - @as(i32, glyph.bearing_y);
+                renderer.drawGlyph(glyph, gx, gy, close_fg);
             } else |_| {}
         }
 

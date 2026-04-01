@@ -38,9 +38,18 @@ pub const TabManager = struct {
         return view;
     }
 
-    /// Close a tab by index. Won't close the last remaining tab.
+    /// Close a tab by index. If it's the last tab, replace with empty buffer.
     pub fn closeTab(self: *TabManager, idx: usize) void {
-        if (self.tabs.items.len <= 1) return;
+        if (idx >= self.tabs.items.len) return;
+
+        if (self.tabs.items.len <= 1) {
+            // Last tab: replace with empty buffer instead of refusing to close
+            const tab = self.tabs.items[0];
+            tab.deinit();
+            tab.* = EditorView.init(self.allocator, "") catch return;
+            return;
+        }
+
         const tab = self.tabs.orderedRemove(idx);
         tab.deinit();
         self.allocator.destroy(tab);
