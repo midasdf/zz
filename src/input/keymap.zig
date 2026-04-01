@@ -97,6 +97,13 @@ pub const Action = enum {
     // Word deletion
     delete_word_left,
     delete_word_right,
+    // Join lines
+    join_lines,
+    // Insert line above/below
+    insert_line_below,
+    insert_line_above,
+    // Theme switcher
+    switch_theme,
 };
 
 pub fn modFromWindow(mods: Window.Modifiers) Modifier {
@@ -126,6 +133,8 @@ pub fn mapKey(keysym: u32, mods: Modifier) ?Action {
         if (keysym == '/') return .toggle_comment;
         // Ctrl+. -> code action
         if (keysym == '.') return .code_action;
+        // Ctrl+Enter -> insert line below
+        if (keysym == Window.XK_Return) return .insert_line_below;
         const k = if (keysym >= 'A' and keysym <= 'Z') keysym + 32 else keysym;
         return switch (k) {
             'a' => .select_all,
@@ -142,11 +151,14 @@ pub fn mapKey(keysym: u32, mods: Modifier) ?Action {
             'h' => .find_replace,
             'd' => .select_next_occurrence,
             'g' => .goto_line,
+            'j' => .join_lines,
             'l' => .select_line,
             else => null,
         };
     }
     if (mods == .ctrl_shift) {
+        // Ctrl+Shift+Enter -> insert line above
+        if (keysym == Window.XK_Return) return .insert_line_above;
         // Ctrl+Shift+Tab -> prev tab (XK_ISO_Left_Tab = 0xFE20)
         if (keysym == Window.XK_Tab or keysym == Window.XK_ISO_Left_Tab) return .prev_tab;
         // Ctrl+Shift+\ (often produces | keysym) -> split horizontal

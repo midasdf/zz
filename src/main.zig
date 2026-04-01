@@ -45,6 +45,11 @@ const command_list = [_][]const u8{
     "View: Go to Line",
     "View: Find",
     "Editor: Close",
+    "Theme: Catppuccin Mocha",
+    "Theme: Tokyo Night",
+    "Theme: Gruvbox Dark",
+    "Theme: One Dark",
+    "Theme: Cycle Next",
 };
 
 const font_path = "/usr/share/fonts/PlemolJP/PlemolJPConsoleNF-Regular.ttf";
@@ -1000,6 +1005,22 @@ fn handleAction(editor: *EditorView, win: *Window, action: keymap.Action, lsp_cl
         .select_line => {
             editor.selectLine();
         },
+        .join_lines => {
+            editor.joinLines() catch {};
+            notifyLspChange(editor, lsp_client, allocator);
+        },
+        .insert_line_below => {
+            editor.insertLineBelow() catch {};
+            notifyLspChange(editor, lsp_client, allocator);
+        },
+        .insert_line_above => {
+            editor.insertLineAbove() catch {};
+            notifyLspChange(editor, lsp_client, allocator);
+        },
+        .switch_theme => {
+            view_mod.cycleTheme();
+            editor.markAllDirty();
+        },
     }
 }
 
@@ -1936,6 +1957,21 @@ fn executeCommand(cmd_name: []const u8, editor: *EditorView) void {
         editor.markAllDirty();
     } else if (std.mem.eql(u8, cmd_name, "Editor: Close")) {
         std.process.exit(0);
+    } else if (std.mem.eql(u8, cmd_name, "Theme: Catppuccin Mocha")) {
+        view_mod.setTheme(&view_mod.themes.catppuccin_mocha);
+        editor.markAllDirty();
+    } else if (std.mem.eql(u8, cmd_name, "Theme: Tokyo Night")) {
+        view_mod.setTheme(&view_mod.themes.tokyo_night);
+        editor.markAllDirty();
+    } else if (std.mem.eql(u8, cmd_name, "Theme: Gruvbox Dark")) {
+        view_mod.setTheme(&view_mod.themes.gruvbox_dark);
+        editor.markAllDirty();
+    } else if (std.mem.eql(u8, cmd_name, "Theme: One Dark")) {
+        view_mod.setTheme(&view_mod.themes.one_dark);
+        editor.markAllDirty();
+    } else if (std.mem.eql(u8, cmd_name, "Theme: Cycle Next")) {
+        view_mod.cycleTheme();
+        editor.markAllDirty();
     }
     // Other commands (Copy, Cut, Paste, Open, Find, Go to Line) require
     // additional context (window for clipboard, overlay for sub-modes).

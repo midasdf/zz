@@ -10,37 +10,181 @@ const Color = @import("../ui/render.zig").Color;
 const Diagnostic = @import("../lsp/client.zig").Diagnostic;
 pub const GitInfo = @import("../core/git.zig").GitInfo;
 
-// ── Catppuccin Mocha palette ───────────────────────────────────────
-const theme = struct {
-    const base = Color.fromHex(0x1e1e2e); // Background
-    const mantle = Color.fromHex(0x181825); // Status bar / darker bg
-    const surface0 = Color.fromHex(0x313244); // Current line highlight
-    const surface1 = Color.fromHex(0x45475a); // Selection
-    const surface2 = Color.fromHex(0x585b70); // Subtle borders
-    const overlay0 = Color.fromHex(0x6c7086); // Line numbers (inactive)
-    const text = Color.fromHex(0xcdd6f4); // Main text
-    const subtext0 = Color.fromHex(0xa6adc8); // Status bar text
-    const rosewater = Color.fromHex(0xf5e0dc); // Cursor
-    const lavender = Color.fromHex(0xb4befe); // Active line number, accents
-    const green = Color.fromHex(0xa6e3a1); // Modified indicator
-    const red = Color.fromHex(0xf38ba8); // Error/close
-    const peach = Color.fromHex(0xfab387); // Warnings
-    const mauve = Color.fromHex(0xcba6f7); // Keywords (future)
-
-    // Syntax colors (Catppuccin Mocha)
-    const syn_keyword = Color.fromHex(0xcba6f7); // Mauve
-    const syn_function = Color.fromHex(0x89b4fa); // Blue
-    const syn_func_builtin = Color.fromHex(0xf9e2af); // Yellow
-    const syn_type = Color.fromHex(0xf9e2af); // Yellow
-    const syn_string = Color.fromHex(0xa6e3a1); // Green
-    const syn_number = Color.fromHex(0xfab387); // Peach
-    const syn_comment = Color.fromHex(0x6c7086); // Overlay0
-    const syn_operator = Color.fromHex(0x89dceb); // Sky
-    const syn_variable = Color.fromHex(0xcdd6f4); // Text
-    const syn_constant = Color.fromHex(0xfab387); // Peach
-    const syn_property = Color.fromHex(0x89b4fa); // Blue
-    const syn_punctuation = Color.fromHex(0x9399b2); // Overlay2
+// ── Theme system ──────────────────────────────────────────────────
+pub const Theme = struct {
+    // UI colors
+    base: Color,
+    mantle: Color,
+    surface0: Color,
+    surface1: Color,
+    surface2: Color,
+    overlay0: Color,
+    text: Color,
+    subtext0: Color,
+    rosewater: Color,
+    lavender: Color,
+    green: Color,
+    red: Color,
+    peach: Color,
+    mauve: Color,
+    // Syntax colors
+    syn_keyword: Color,
+    syn_function: Color,
+    syn_func_builtin: Color,
+    syn_type: Color,
+    syn_string: Color,
+    syn_number: Color,
+    syn_comment: Color,
+    syn_operator: Color,
+    syn_variable: Color,
+    syn_constant: Color,
+    syn_property: Color,
+    syn_punctuation: Color,
 };
+
+pub const themes = struct {
+    pub const catppuccin_mocha = Theme{
+        .base = Color.fromHex(0x1e1e2e),
+        .mantle = Color.fromHex(0x181825),
+        .surface0 = Color.fromHex(0x313244),
+        .surface1 = Color.fromHex(0x45475a),
+        .surface2 = Color.fromHex(0x585b70),
+        .overlay0 = Color.fromHex(0x6c7086),
+        .text = Color.fromHex(0xcdd6f4),
+        .subtext0 = Color.fromHex(0xa6adc8),
+        .rosewater = Color.fromHex(0xf5e0dc),
+        .lavender = Color.fromHex(0xb4befe),
+        .green = Color.fromHex(0xa6e3a1),
+        .red = Color.fromHex(0xf38ba8),
+        .peach = Color.fromHex(0xfab387),
+        .mauve = Color.fromHex(0xcba6f7),
+        .syn_keyword = Color.fromHex(0xcba6f7),
+        .syn_function = Color.fromHex(0x89b4fa),
+        .syn_func_builtin = Color.fromHex(0xf9e2af),
+        .syn_type = Color.fromHex(0xf9e2af),
+        .syn_string = Color.fromHex(0xa6e3a1),
+        .syn_number = Color.fromHex(0xfab387),
+        .syn_comment = Color.fromHex(0x6c7086),
+        .syn_operator = Color.fromHex(0x89dceb),
+        .syn_variable = Color.fromHex(0xcdd6f4),
+        .syn_constant = Color.fromHex(0xfab387),
+        .syn_property = Color.fromHex(0x89b4fa),
+        .syn_punctuation = Color.fromHex(0x9399b2),
+    };
+
+    pub const tokyo_night = Theme{
+        .base = Color.fromHex(0x1a1b26),
+        .mantle = Color.fromHex(0x16161e),
+        .surface0 = Color.fromHex(0x292e42),
+        .surface1 = Color.fromHex(0x3b4261),
+        .surface2 = Color.fromHex(0x545c7e),
+        .overlay0 = Color.fromHex(0x565f89),
+        .text = Color.fromHex(0xc0caf5),
+        .subtext0 = Color.fromHex(0xa9b1d6),
+        .rosewater = Color.fromHex(0xf7768e),
+        .lavender = Color.fromHex(0x7aa2f7),
+        .green = Color.fromHex(0x9ece6a),
+        .red = Color.fromHex(0xf7768e),
+        .peach = Color.fromHex(0xff9e64),
+        .mauve = Color.fromHex(0xbb9af7),
+        .syn_keyword = Color.fromHex(0xbb9af7),
+        .syn_function = Color.fromHex(0x7aa2f7),
+        .syn_func_builtin = Color.fromHex(0xe0af68),
+        .syn_type = Color.fromHex(0x2ac3de),
+        .syn_string = Color.fromHex(0x9ece6a),
+        .syn_number = Color.fromHex(0xff9e64),
+        .syn_comment = Color.fromHex(0x565f89),
+        .syn_operator = Color.fromHex(0x89ddff),
+        .syn_variable = Color.fromHex(0xc0caf5),
+        .syn_constant = Color.fromHex(0xff9e64),
+        .syn_property = Color.fromHex(0x73daca),
+        .syn_punctuation = Color.fromHex(0xa9b1d6),
+    };
+
+    pub const gruvbox_dark = Theme{
+        .base = Color.fromHex(0x282828),
+        .mantle = Color.fromHex(0x1d2021),
+        .surface0 = Color.fromHex(0x3c3836),
+        .surface1 = Color.fromHex(0x504945),
+        .surface2 = Color.fromHex(0x665c54),
+        .overlay0 = Color.fromHex(0x7c6f64),
+        .text = Color.fromHex(0xebdbb2),
+        .subtext0 = Color.fromHex(0xd5c4a1),
+        .rosewater = Color.fromHex(0xfb4934),
+        .lavender = Color.fromHex(0x83a598),
+        .green = Color.fromHex(0xb8bb26),
+        .red = Color.fromHex(0xfb4934),
+        .peach = Color.fromHex(0xfe8019),
+        .mauve = Color.fromHex(0xd3869b),
+        .syn_keyword = Color.fromHex(0xfb4934),
+        .syn_function = Color.fromHex(0xb8bb26),
+        .syn_func_builtin = Color.fromHex(0xfabd2f),
+        .syn_type = Color.fromHex(0xfabd2f),
+        .syn_string = Color.fromHex(0xb8bb26),
+        .syn_number = Color.fromHex(0xd3869b),
+        .syn_comment = Color.fromHex(0x928374),
+        .syn_operator = Color.fromHex(0x8ec07c),
+        .syn_variable = Color.fromHex(0xebdbb2),
+        .syn_constant = Color.fromHex(0xd3869b),
+        .syn_property = Color.fromHex(0x83a598),
+        .syn_punctuation = Color.fromHex(0xa89984),
+    };
+
+    pub const one_dark = Theme{
+        .base = Color.fromHex(0x282c34),
+        .mantle = Color.fromHex(0x21252b),
+        .surface0 = Color.fromHex(0x2c313a),
+        .surface1 = Color.fromHex(0x3e4451),
+        .surface2 = Color.fromHex(0x5c6370),
+        .overlay0 = Color.fromHex(0x636d83),
+        .text = Color.fromHex(0xabb2bf),
+        .subtext0 = Color.fromHex(0x9da5b4),
+        .rosewater = Color.fromHex(0xe06c75),
+        .lavender = Color.fromHex(0x61afef),
+        .green = Color.fromHex(0x98c379),
+        .red = Color.fromHex(0xe06c75),
+        .peach = Color.fromHex(0xd19a66),
+        .mauve = Color.fromHex(0xc678dd),
+        .syn_keyword = Color.fromHex(0xc678dd),
+        .syn_function = Color.fromHex(0x61afef),
+        .syn_func_builtin = Color.fromHex(0xe5c07b),
+        .syn_type = Color.fromHex(0xe5c07b),
+        .syn_string = Color.fromHex(0x98c379),
+        .syn_number = Color.fromHex(0xd19a66),
+        .syn_comment = Color.fromHex(0x5c6370),
+        .syn_operator = Color.fromHex(0x56b6c2),
+        .syn_variable = Color.fromHex(0xabb2bf),
+        .syn_constant = Color.fromHex(0xd19a66),
+        .syn_property = Color.fromHex(0xe06c75),
+        .syn_punctuation = Color.fromHex(0xabb2bf),
+    };
+
+    pub const names = [_][]const u8{ "Catppuccin Mocha", "Tokyo Night", "Gruvbox Dark", "One Dark" };
+    pub const all = [_]*const Theme{ &catppuccin_mocha, &tokyo_night, &gruvbox_dark, &one_dark };
+};
+
+var active_theme: *const Theme = &themes.catppuccin_mocha;
+
+pub fn setTheme(t: *const Theme) void {
+    active_theme = t;
+}
+
+pub fn cycleTheme() void {
+    for (themes.all, 0..) |t, i| {
+        if (t == active_theme) {
+            active_theme = themes.all[(i + 1) % themes.all.len];
+            return;
+        }
+    }
+    active_theme = themes.all[0];
+}
+
+pub fn activeThemeName() []const u8 {
+    for (themes.all, 0..) |t, i| {
+        if (t == active_theme) return themes.names[i];
+    }
+    return "Unknown";
+}
 
 // ── EditorView ─────────────────────────────────────────────────────
 pub const EditorView = struct {
@@ -834,7 +978,7 @@ pub const EditorView = struct {
             }
 
             const is_current_line = (doc_line == cursor_lc.line);
-            const line_bg = if (is_current_line) theme.surface0 else theme.base;
+            const line_bg = if (is_current_line) active_theme.surface0 else active_theme.base;
 
             // Clear the entire row (gutter + code area) within this pane
             renderer.fillRect(xo, row_y, pw, cell_h, line_bg);
@@ -851,7 +995,7 @@ pub const EditorView = struct {
                 if (font.getGlyph('>')) |glyph| {
                     const gx = @as(i32, @intCast(fold_x)) + glyph.bearing_x;
                     const gy = @as(i32, @intCast(row_y)) + font.ascent - glyph.bearing_y;
-                    renderer.drawGlyph(glyph, gx, gy, theme.peach);
+                    renderer.drawGlyph(glyph, gx, gy, active_theme.peach);
                 } else |_| {}
             }
 
@@ -860,9 +1004,9 @@ pub const EditorView = struct {
                 if (doc_line < total_lines) {
                     if (gi.lineKind(doc_line)) |kind| {
                         const diff_color: Color = switch (kind) {
-                            .added => theme.green,
-                            .modified => theme.peach,
-                            .deleted => theme.red,
+                            .added => active_theme.green,
+                            .modified => active_theme.peach,
+                            .deleted => active_theme.red,
                         };
                         renderer.fillRect(xo, row_y, 2, cell_h, diff_color);
                     }
@@ -871,7 +1015,7 @@ pub const EditorView = struct {
 
             // -- Gutter separator (1px vertical line) --
             const sep_x = xo + gw - self.left_pad / 2;
-            renderer.fillRect(sep_x, row_y, 1, cell_h, theme.surface2);
+            renderer.fillRect(sep_x, row_y, 1, cell_h, active_theme.surface2);
 
             // -- Code area --
             if (doc_line < total_lines) {
@@ -893,7 +1037,7 @@ pub const EditorView = struct {
                         if (font.getGlyph(ch)) |glyph| {
                             const gfx = @as(i32, @intCast(fx)) + glyph.bearing_x;
                             const gfy = @as(i32, @intCast(row_y)) + font.ascent - glyph.bearing_y;
-                            renderer.drawGlyph(glyph, gfx, gfy, theme.overlay0);
+                            renderer.drawGlyph(glyph, gfx, gfy, active_theme.overlay0);
                         } else |_| {}
                         fx += cell_w;
                     }
@@ -913,7 +1057,7 @@ pub const EditorView = struct {
                     if (clc.line == doc_line) {
                         const vcol = self.visualColAtOffset(clc.line, clc.col);
                         const cursor_px_x = code_x + self.left_pad + vcol * cell_w;
-                        renderer.fillRect(cursor_px_x, row_y, 2, cell_h, theme.rosewater);
+                        renderer.fillRect(cursor_px_x, row_y, 2, cell_h, active_theme.rosewater);
                     }
                 }
             }
@@ -924,9 +1068,9 @@ pub const EditorView = struct {
                     const vcol = self.visualColAtOffset(mlc.line, mlc.col);
                     const bx = code_x + self.left_pad + vcol * cell_w;
                     // Background highlight
-                    renderer.fillRect(bx, row_y, cell_w, cell_h, theme.surface2);
+                    renderer.fillRect(bx, row_y, cell_w, cell_h, active_theme.surface2);
                     // Underline (2px at bottom)
-                    renderer.fillRect(bx, row_y + cell_h - 2, cell_w, 2, theme.lavender);
+                    renderer.fillRect(bx, row_y + cell_h - 2, cell_w, 2, active_theme.lavender);
                     // Re-draw the bracket character on top of the highlight
                     if (match_pos) |mp| {
                         const ms = self.buffer.contiguousSliceAt(mp);
@@ -934,7 +1078,7 @@ pub const EditorView = struct {
                             if (font.getGlyph(ms[0])) |glyph| {
                                 const gx = @as(i32, @intCast(bx)) + glyph.bearing_x;
                                 const gy = @as(i32, @intCast(row_y)) + font.ascent - glyph.bearing_y;
-                                renderer.drawGlyph(glyph, gx, gy, theme.lavender);
+                                renderer.drawGlyph(glyph, gx, gy, active_theme.lavender);
                             } else |_| {}
                         }
                     }
@@ -1025,7 +1169,7 @@ pub const EditorView = struct {
         if (sl >= self.scroll_line and sl < self.scroll_line + self.visible_rows) return;
 
         // Background overlay
-        renderer.fillRect(xo, sticky_y, pw, cell_h, theme.mantle);
+        renderer.fillRect(xo, sticky_y, pw, cell_h, active_theme.mantle);
 
         // Render gutter number for the scope line
         self.renderGutterNumber(renderer, font, sl, 0, false);
@@ -1033,10 +1177,10 @@ pub const EditorView = struct {
         // Render code content
         const line_start = self.buffer.lineToOffset(sl);
         var empty_wh: [0]WordHighlight = undefined;
-        self.renderCodeLine(renderer, font, line_start, sl, 0, code_x, theme.mantle, false, &empty_wh);
+        self.renderCodeLine(renderer, font, line_start, sl, 0, code_x, active_theme.mantle, false, &empty_wh);
 
         // Bottom border
-        renderer.fillRect(xo, sticky_y + cell_h - 1, pw, 1, theme.surface2);
+        renderer.fillRect(xo, sticky_y + cell_h - 1, pw, 1, active_theme.surface2);
     }
 
     // ── Minimap ────────────────────────────────────────────────────
@@ -1055,10 +1199,10 @@ pub const EditorView = struct {
         const mm_h = self.visible_rows * cell_h;
 
         // Minimap background
-        renderer.fillRect(mm_x, mm_y, mm_w, mm_h, theme.mantle);
+        renderer.fillRect(mm_x, mm_y, mm_w, mm_h, active_theme.mantle);
 
         // Left border (1px)
-        renderer.fillRect(mm_x, mm_y, 1, mm_h, theme.surface2);
+        renderer.fillRect(mm_x, mm_y, 1, mm_h, active_theme.surface2);
 
         const total_lines = self.buffer.lineCount();
         const line_height: u32 = 2; // Each doc line = 2px in minimap
@@ -1091,7 +1235,7 @@ pub const EditorView = struct {
                 mm_y;
             const vp_h = if (vp_end > vp_start) vp_end - vp_start else 0;
             if (vp_h > 0) {
-                renderer.fillRect(mm_x, vp_start, mm_w, vp_h, theme.surface0);
+                renderer.fillRect(mm_x, vp_start, mm_w, vp_h, active_theme.surface0);
             }
         }
 
@@ -1230,8 +1374,8 @@ pub const EditorView = struct {
         const row_y = self.y_offset + screen_row * cell_h;
         const xo = self.x_offset;
 
-        const fg_color = if (is_current) theme.lavender else theme.overlay0;
-        const line_bg = if (is_current) theme.surface0 else theme.base;
+        const fg_color = if (is_current) active_theme.lavender else active_theme.overlay0;
+        const line_bg = if (is_current) active_theme.surface0 else active_theme.base;
 
         // Line number (1-based, right-aligned)
         const line_num = doc_line + 1;
@@ -1293,7 +1437,7 @@ pub const EditorView = struct {
             // Determine background: selection > word highlight > current-line
             var cell_bg = line_bg;
             if (has_sel and self.isInAnySelection(offset)) {
-                cell_bg = theme.surface1;
+                cell_bg = active_theme.surface1;
             } else if (isInWordHighlight(offset, word_highlights)) {
                 cell_bg = word_hl_bg;
             }
@@ -1395,7 +1539,7 @@ pub const EditorView = struct {
         const bar_w: u32 = 6;
 
         // Track background (very subtle)
-        renderer.fillRect(bar_x, bar_y, bar_w, bar_h, theme.surface0);
+        renderer.fillRect(bar_x, bar_y, bar_w, bar_h, active_theme.surface0);
 
         // Thumb: proportional to visible fraction, min 20px
         const total_f = @as(f32, @floatFromInt(total_lines));
@@ -1412,7 +1556,7 @@ pub const EditorView = struct {
         const thumb_y_offset: u32 = @intFromFloat(thumb_travel * scroll_ratio);
         const thumb_y = bar_y + thumb_y_offset;
 
-        renderer.fillRect(bar_x, thumb_y, bar_w, thumb_h, theme.overlay0);
+        renderer.fillRect(bar_x, thumb_y, bar_w, thumb_h, active_theme.overlay0);
     }
 
     fn renderDiagnostics(
@@ -1434,10 +1578,10 @@ pub const EditorView = struct {
             if (diag.line != doc_line) continue;
 
             const color: Color = switch (diag.severity) {
-                .err => theme.red,
-                .warning => theme.peach,
-                .info => theme.lavender,
-                .hint => theme.overlay0,
+                .err => active_theme.red,
+                .warning => active_theme.peach,
+                .info => active_theme.lavender,
+                .hint => active_theme.overlay0,
             };
 
             // Convert byte columns to visual columns for underline placement
@@ -1468,12 +1612,12 @@ pub const EditorView = struct {
         const status_y = self.y_offset + self.visible_rows * cell_h;
 
         // Top border (1px surface2) — subtle separator
-        renderer.fillRect(xo, status_y, pw, 1, theme.surface2);
+        renderer.fillRect(xo, status_y, pw, 1, active_theme.surface2);
 
         // Status bar background — fill from separator to bottom of window
         const bar_y = status_y + 1;
         const bar_h = if (renderer.height > bar_y) renderer.height - bar_y else cell_h + bar_pad;
-        renderer.fillRect(xo, bar_y, pw, bar_h, theme.mantle);
+        renderer.fillRect(xo, bar_y, pw, bar_h, active_theme.mantle);
 
         // Text baseline — vertically centered in the bar
         const text_y = bar_y + bar_pad / 2;
@@ -1490,10 +1634,10 @@ pub const EditorView = struct {
                 const px_x = xo + left_col * cell_w;
                 const gx = @as(i32, @intCast(px_x)) + glyph.bearing_x;
                 const gy = @as(i32, @intCast(text_y)) + font.ascent - glyph.bearing_y;
-                renderer.drawGlyph(glyph, gx, gy, theme.lavender);
+                renderer.drawGlyph(glyph, gx, gy, active_theme.lavender);
             } else |_| {
                 // Fallback: draw '*' as branch indicator
-                self.drawStatusChar(renderer, font, '*', left_col, text_y, theme.lavender);
+                self.drawStatusChar(renderer, font, '*', left_col, text_y, active_theme.lavender);
             }
             left_col += 1;
             // Space after icon
@@ -1501,14 +1645,14 @@ pub const EditorView = struct {
             // Branch name in lavender
             for (branch_name) |ch| {
                 if (left_col >= self.visible_cols) break;
-                self.drawStatusChar(renderer, font, ch, left_col, text_y, theme.lavender);
+                self.drawStatusChar(renderer, font, ch, left_col, text_y, active_theme.lavender);
                 left_col += 1;
             }
             // Separator
             const sep = "  |  ";
             for (sep) |ch| {
                 if (left_col >= self.visible_cols) break;
-                self.drawStatusChar(renderer, font, ch, left_col, text_y, theme.surface2);
+                self.drawStatusChar(renderer, font, ch, left_col, text_y, active_theme.surface2);
                 left_col += 1;
             }
         }
@@ -1521,11 +1665,11 @@ pub const EditorView = struct {
                 // Render " > " separator instead of slash
                 for (" > ") |sep_ch| {
                     if (left_col >= self.visible_cols) break;
-                    self.drawStatusChar(renderer, font, sep_ch, left_col, text_y, theme.overlay0);
+                    self.drawStatusChar(renderer, font, sep_ch, left_col, text_y, active_theme.overlay0);
                     left_col += 1;
                 }
             } else {
-                self.drawStatusChar(renderer, font, ch, left_col, text_y, theme.subtext0);
+                self.drawStatusChar(renderer, font, ch, left_col, text_y, active_theme.subtext0);
                 left_col += 1;
             }
         }
@@ -1534,7 +1678,7 @@ pub const EditorView = struct {
             const mod_str = " [+]";
             for (mod_str) |ch| {
                 if (left_col >= self.visible_cols) break;
-                const color = if (ch == '+') theme.green else theme.subtext0;
+                const color = if (ch == '+') active_theme.green else active_theme.subtext0;
                 self.drawStatusChar(renderer, font, ch, left_col, text_y, color);
                 left_col += 1;
             }
@@ -1592,12 +1736,12 @@ pub const EditorView = struct {
             const sel_sep = "   ";
             for (sel_sep) |ch| {
                 if (left_col >= self.visible_cols) break;
-                self.drawStatusChar(renderer, font, ch, left_col, text_y, theme.surface2);
+                self.drawStatusChar(renderer, font, ch, left_col, text_y, active_theme.surface2);
                 left_col += 1;
             }
             for (sel_info_buf[0..sel_info_len]) |ch| {
                 if (left_col >= self.visible_cols) break;
-                self.drawStatusChar(renderer, font, ch, left_col, text_y, theme.lavender);
+                self.drawStatusChar(renderer, font, ch, left_col, text_y, active_theme.lavender);
                 left_col += 1;
             }
         }
@@ -1612,7 +1756,7 @@ pub const EditorView = struct {
         for (right_str, 0..) |ch, i| {
             const col = right_start + @as(u32, @intCast(i));
             if (col >= self.visible_cols) break;
-            self.drawStatusChar(renderer, font, ch, col, text_y, theme.subtext0);
+            self.drawStatusChar(renderer, font, ch, col, text_y, active_theme.subtext0);
         }
     }
 
@@ -1890,6 +2034,93 @@ pub const EditorView = struct {
             self.markAllDirty();
             self.ensureCursorVisible();
         }
+    }
+
+    // ── Join lines (Ctrl+J) ────────────────────────────────────────
+
+    pub fn joinLines(self: *EditorView) !void {
+        const lc = self.buffer.offsetToLineCol(self.cursor.primary().head);
+        if (lc.line + 1 >= self.buffer.lineCount()) return;
+
+        // Find end of current line (the newline character)
+        const next_line = self.buffer.lineToOffset(lc.line + 1);
+        const newline_pos = next_line - 1;
+
+        // Count leading whitespace on next line
+        var ws_end = next_line;
+        while (ws_end < self.buffer.total_len) {
+            const s = self.buffer.contiguousSliceAt(ws_end);
+            if (s.len == 0) break;
+            if (s[0] != ' ' and s[0] != '\t') break;
+            ws_end += 1;
+        }
+
+        // Delete from newline through leading whitespace, replace with single space
+        const del_len = ws_end - newline_pos;
+        try self.buffer.delete(newline_pos, del_len);
+        self.highlighter.notifyEdit(&self.buffer, newline_pos, newline_pos + del_len, newline_pos);
+        try self.buffer.insert(newline_pos, " ");
+        self.highlighter.notifyEdit(&self.buffer, newline_pos, newline_pos, newline_pos + 1);
+
+        self.cursor.moveTo(newline_pos);
+        self.modified = true;
+        self.markAllDirty();
+        self.ensureCursorVisible();
+    }
+
+    // ── Insert line above/below ──────────────────────────────────────
+
+    pub fn insertLineBelow(self: *EditorView) !void {
+        // Move to end of current line, then insert newline with auto-indent
+        const lc = self.buffer.offsetToLineCol(self.cursor.primary().head);
+        const next_line = if (lc.line + 1 < self.buffer.lineCount())
+            self.buffer.lineToOffset(lc.line + 1)
+        else
+            self.buffer.total_len;
+
+        // Position cursor at end of current line (before newline)
+        const eol = if (next_line > 0 and lc.line + 1 < self.buffer.lineCount()) next_line - 1 else next_line;
+        self.cursor.moveTo(eol);
+
+        // Insert newline with auto-indent
+        try self.insertNewline();
+    }
+
+    pub fn insertLineAbove(self: *EditorView) !void {
+        const lc = self.buffer.offsetToLineCol(self.cursor.primary().head);
+        const line_start = self.buffer.lineToOffset(lc.line);
+
+        // Get indent of current line
+        const indent = self.getLineIndent(lc.line);
+        var buf: [257]u8 = undefined;
+        const safe_indent = @min(indent, 256);
+        @memset(buf[0..safe_indent], ' ');
+        buf[safe_indent] = '\n';
+
+        try self.buffer.insert(line_start, buf[0 .. safe_indent + 1]);
+        self.highlighter.notifyEdit(&self.buffer, line_start, line_start, line_start + safe_indent + 1);
+        self.cursor.moveTo(line_start + safe_indent);
+        self.modified = true;
+        self.markAllDirty();
+        self.ensureCursorVisible();
+    }
+
+    fn getLineIndent(self: *const EditorView, line: u32) u32 {
+        const line_start = self.buffer.lineToOffset(line);
+        var indent: u32 = 0;
+        var off = line_start;
+        while (off < self.buffer.total_len) {
+            const s = self.buffer.contiguousSliceAt(off);
+            if (s.len == 0) break;
+            if (s[0] == ' ') {
+                indent += 1;
+                off += 1;
+            } else if (s[0] == '\t') {
+                indent += 4;
+                off += 1;
+            } else break;
+        }
+        return indent;
     }
 
     // ── Auto-indent newline ───────────────────────────────────────
@@ -2194,7 +2425,7 @@ pub const EditorView = struct {
         }
 
         // Draw vertical guide lines at each tab stop within the indent
-        const guide_color = theme.surface2;
+        const guide_color = active_theme.surface2;
         var level: u32 = tab_size;
         while (level < indent) : (level += tab_size) {
             const guide_x = code_x + self.left_pad + level * cell_w;
@@ -2298,17 +2529,17 @@ pub fn renderTabBar(
     const win_w = renderer.width;
 
     // Full bar background (mantle — darker than editor)
-    renderer.fillRect(0, 0, win_w, bar_h, theme.mantle);
+    renderer.fillRect(0, 0, win_w, bar_h, active_theme.mantle);
 
     // Bottom separator (1px surface2)
-    renderer.fillRect(0, bar_h - 1, win_w, 1, theme.surface2);
+    renderer.fillRect(0, bar_h - 1, win_w, 1, active_theme.surface2);
 
     // Render each tab (offset by sidebar width)
     var x: u32 = x_start + 4;
     for (tab_mgr.tabs.items, 0..) |tab, i| {
         const is_active = (i == tab_mgr.active);
-        const bg = if (is_active) theme.base else theme.mantle;
-        const fg = if (is_active) theme.text else theme.overlay0;
+        const bg = if (is_active) active_theme.base else active_theme.mantle;
+        const fg = if (is_active) active_theme.text else active_theme.overlay0;
 
         // Tab label
         const label = if (tab.file_path) |p| basename(p) else "[untitled]";
@@ -2321,7 +2552,7 @@ pub fn renderTabBar(
 
         // Active tab: 2px lavender accent line at TOP
         if (is_active) {
-            renderer.fillRect(x, 0, tab_w, 2, theme.lavender);
+            renderer.fillRect(x, 0, tab_w, 2, active_theme.lavender);
         }
 
         // Tab label text — vertically centered
@@ -2342,7 +2573,7 @@ pub fn renderTabBar(
             if (font.getGlyph('+')) |glyph| {
                 const gx: i32 = @intCast(tx);
                 const gy: i32 = @as(i32, @intCast(text_y)) + font.ascent - @as(i32, glyph.bearing_y);
-                renderer.drawGlyph(glyph, gx, gy, theme.green);
+                renderer.drawGlyph(glyph, gx, gy, active_theme.green);
             } else |_| {}
         }
 
@@ -2361,19 +2592,19 @@ fn basename(path: []const u8) []const u8 {
 
 fn syntaxColor(kind: SyntaxKind) Color {
     return switch (kind) {
-        .keyword => theme.syn_keyword,
-        .function => theme.syn_function,
-        .function_builtin => theme.syn_func_builtin,
-        .type_name => theme.syn_type,
-        .string => theme.syn_string,
-        .number => theme.syn_number,
-        .comment => theme.syn_comment,
-        .operator => theme.syn_operator,
-        .variable => theme.syn_variable,
-        .constant => theme.syn_constant,
-        .property => theme.syn_property,
-        .punctuation => theme.syn_punctuation,
-        .none => theme.text,
+        .keyword => active_theme.syn_keyword,
+        .function => active_theme.syn_function,
+        .function_builtin => active_theme.syn_func_builtin,
+        .type_name => active_theme.syn_type,
+        .string => active_theme.syn_string,
+        .number => active_theme.syn_number,
+        .comment => active_theme.syn_comment,
+        .operator => active_theme.syn_operator,
+        .variable => active_theme.syn_variable,
+        .constant => active_theme.syn_constant,
+        .property => active_theme.syn_property,
+        .punctuation => active_theme.syn_punctuation,
+        .none => active_theme.text,
     };
 }
 
