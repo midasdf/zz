@@ -117,8 +117,37 @@ pub const PieceTable = struct {
             .total_len = self.total_len,
         });
 
-        for (self.redo_stack.items) |*entry| entry.deinit(self.allocator);
-        self.redo_stack.clearRetainingCapacity();
+        if (self.redo_stack.items.len > 0) {
+            for (self.redo_stack.items) |*entry| entry.deinit(self.allocator);
+            self.redo_stack.clearRetainingCapacity();
+            // Good time to compact: redo is gone, no snapshots reference old offsets
+            self.compactIfNeeded();
+        }
+    }
+
+    /// Compact add_buf by rebuilding with only referenced content.
+    /// Only runs when add_buf is large relative to the document and
+    /// both undo and redo stacks are empty (no snapshots reference old offsets).
+    fn compactIfNeeded(self: *PieceTable) void {
+        // Skip if add_buf is small
+        if (self.add_buf.items.len < 1024 * 1024) return;
+        // Skip if add_buf isn't bloated relative to document size
+        if (self.add_buf.items.len < self.total_len * 4) return;
+        // Don't compact if undo entries exist (they reference add_buf offsets)
+        if (self.undo_stack.items.len > 0) return;
+
+        var new_add: std.ArrayList(u8) = .{};
+        for (self.pieces.items) |*piece| {
+            if (piece.source == .add) {
+                const content = self.add_buf.items[piece.start..][0..piece.len];
+                const new_start: u32 = @intCast(new_add.items.len);
+                new_add.appendSlice(self.allocator, content) catch return;
+                piece.start = new_start;
+            }
+        }
+
+        self.add_buf.deinit(self.allocator);
+        self.add_buf = new_add;
     }
 
     pub fn undo(self: *PieceTable) !bool {

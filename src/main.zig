@@ -22,6 +22,12 @@ const search_ops = @import("core/search_ops.zig");
 const lsp_ops = @import("core/lsp_ops.zig");
 const popups = @import("ui/popups.zig");
 
+fn logError(context: []const u8, err: anyerror) void {
+    var buf: [128]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "zz: {s}: {s}\n", .{ context, @errorName(err) }) catch return;
+    _ = std.posix.write(std.posix.STDERR_FILENO, msg) catch {};
+}
+
 const EditorMode = enum {
     normal,
     command_palette,
@@ -122,7 +128,7 @@ pub fn main() !void {
     var file_tree = FileTree.init(allocator, ".");
     defer file_tree.deinit();
     file_tree.visible = true;
-    file_tree.populate() catch {};
+    file_tree.populate() catch |err| logError("file tree populate", err);
 
     // Terminal panel
     var terminal = try Terminal.init(allocator);
@@ -138,7 +144,7 @@ pub fn main() !void {
             var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
             const cwd_path = std.fs.cwd().realpath(".", &cwd_buf) catch null;
             if (cwd_path) |root| {
-                lsp_client.start(cmd, root) catch {};
+                lsp_client.start(cmd, root) catch |err| logError("LSP start", err);
                 // Send didOpen
                 var uri_buf: [4096]u8 = undefined;
                 const uri = lsp.formatUri(path, &uri_buf);
@@ -179,6 +185,9 @@ pub fn main() !void {
 
     // Format-on-save: when true, auto-save after formatting edits arrive
     var format_then_save = false;
+
+    // LSP batched sync: set true on edits, sync once before render
+    var lsp_needs_sync = false;
 
     // Epoll setup
     const epoll_fd = try std.posix.epoll_create1(std.os.linux.EPOLL.CLOEXEC);
@@ -273,7 +282,7 @@ pub fn main() !void {
                                             // Delete the partial word being typed, then insert completion
                                             lsp_ops.deleteWordBeforeCursor(editor);
                                             editor.insertAtCursor(item.label) catch {};
-                                            lsp_ops.notifyLspChange(editor, &lsp_client, allocator);
+                                            lsp_needs_sync = true;
                                         }
                                         completion_active = false;
                                         editor.markAllDirty();
@@ -285,7 +294,7 @@ pub fn main() !void {
                                     }
                                 }
                                 if (mode != .normal) {
-                                    handleOverlayKey(&mode, &overlay, &tab_mgr, &pane_mgr, ke, allocator, &file_list, &filtered_display, &search_results, &lsp_client, &font, &git_info, &replace_buf, &replace_len, &replace_field_active);
+                                    handleOverlayKey(&mode, &overlay, &tab_mgr, &pane_mgr, ke, allocator, &file_list, &filtered_display, &search_results, &lsp_client, &font, &git_info, &replace_buf, &replace_len, &replace_field_active, &lsp_needs_sync);
                                 } else {
                                     const mod = keymap.modFromWindow(ke.modifiers);
                                     // Check for toggle_terminal first (Ctrl+`)
@@ -300,7 +309,7 @@ pub fn main() !void {
                                                             .events = std.os.linux.EPOLL.IN,
                                                             .data = .{ .u32 = 3 },
                                                         };
-                                                        std.posix.epoll_ctl(epoll_fd, std.os.linux.EPOLL.CTL_ADD, pty_fd, &pty_ev) catch {};
+                                                        std.posix.epoll_ctl(epoll_fd, std.os.linux.EPOLL.CTL_ADD, pty_fd, &pty_ev) catch |err| logError("PTY epoll register", err);
                                                         pty_registered = pty_fd;
                                                     }
                                                 }
@@ -400,7 +409,7 @@ pub fn main() !void {
                                                         format_then_save = true;
                                                     }
                                                 } else {
-                                                    handleAction(editor, &win, action, &lsp_client, allocator);
+                                                    handleAction(editor, &win, action, &lsp_client, &lsp_needs_sync);
                                                 }
                                             },
                                             .toggle_minimap => {
@@ -412,7 +421,7 @@ pub fn main() !void {
                                                 editor.markAllDirty();
                                             },
                                             .toggle_terminal => unreachable,
-                                            else => handleAction(editor, &win, action, &lsp_client, allocator),
+                                            else => handleAction(editor, &win, action, &lsp_client, &lsp_needs_sync),
                                         }
                                         }
                                         resetCursorBlink(editor);
@@ -449,10 +458,13 @@ pub fn main() !void {
                                     if (!auto_closed) {
                                         editor.insertAtCursor(text) catch {};
                                     }
-                                    lsp_ops.notifyLspChange(editor, &lsp_client, allocator);
+                                    lsp_needs_sync = true;
                                     resetCursorBlink(editor);
                                     // Auto-trigger completion after . : ( @
                                     if (text.len == 1 and (text[0] == '.' or text[0] == ':' or text[0] == '(' or text[0] == '@')) {
+                                        // Flush LSP sync before request so server sees latest content
+                                        lsp_needs_sync = false;
+                                        lsp_ops.notifyLspChange(editor, &lsp_client, allocator);
                                         if (editor.file_path) |path| {
                                             var uri_buf2: [4096]u8 = undefined;
                                             const uri2 = lsp.formatUri(path, &uri_buf2);
@@ -462,6 +474,10 @@ pub fn main() !void {
                                     }
                                     // Auto-trigger signature help after ( and ,
                                     if (text.len == 1 and (text[0] == '(' or text[0] == ',')) {
+                                        if (lsp_needs_sync) {
+                                            lsp_needs_sync = false;
+                                            lsp_ops.notifyLspChange(editor, &lsp_client, allocator);
+                                        }
                                         if (editor.file_path) |path| {
                                             var sh_buf: [4096]u8 = undefined;
                                             const sh_uri = lsp.formatUri(path, &sh_buf);
@@ -477,7 +493,7 @@ pub fn main() !void {
                             },
 
                             .resize => |r| {
-                                win.resize(r.width, r.height) catch {};
+                                win.resize(r.width, r.height) catch |err| logError("window resize", err);
                                 relayoutWithTerminal(&pane_mgr, &file_tree, &terminal, tab_bar_h, r.width, r.height, &font);
                             },
 
@@ -596,7 +612,7 @@ pub fn main() !void {
                                 } else {
                                     const active = pane_mgr.active_leaf;
                                     active.insertAtCursor(pe.data) catch {};
-                                    lsp_ops.notifyLspChange(active, &lsp_client, allocator);
+                                    lsp_needs_sync = true;
                                     resetCursorBlink(editor);
                                 }
                                 pe.deinit();
@@ -756,6 +772,12 @@ pub fn main() !void {
             }
         }
 
+        // Flush batched LSP sync before render
+        if (lsp_needs_sync) {
+            lsp_needs_sync = false;
+            lsp_ops.notifyLspChange(pane_mgr.active_leaf, &lsp_client, allocator);
+        }
+
         {
             const editor = pane_mgr.active_leaf;
             editor.lsp_diagnostics = lsp_client.diagnostics.items;
@@ -811,7 +833,7 @@ fn relayoutPanes(pane_mgr: *PaneManager, file_tree: *FileTree, tab_bar_h: u32, w
     var leaves: [16]*EditorView = undefined;
     const count = pane_mgr.allLeaves(&leaves);
     for (leaves[0..count]) |view| {
-        view.updateViewport(view.paneWidth(editor_w), win_h, font) catch {};
+        view.updateViewport(view.paneWidth(editor_w), win_h, font) catch |err| logError("viewport update", err);
     }
 }
 
@@ -826,7 +848,7 @@ fn relayoutWithTerminal(pane_mgr: *PaneManager, file_tree: *FileTree, term: *Ter
     var leaves: [16]*EditorView = undefined;
     const count = pane_mgr.allLeaves(&leaves);
     for (leaves[0..count]) |view| {
-        view.updateViewport(view.paneWidth(editor_w), tab_bar_h + available_h, font) catch {};
+        view.updateViewport(view.paneWidth(editor_w), tab_bar_h + available_h, font) catch |err| logError("viewport update", err);
     }
 
     // Update terminal layout
@@ -863,7 +885,7 @@ fn markAllPanesDirty(pane_mgr: *PaneManager) void {
     }
 }
 
-fn handleAction(editor: *EditorView, win: *Window, action: keymap.Action, lsp_client: *lsp.LspClient, allocator: std.mem.Allocator) void {
+fn handleAction(editor: *EditorView, win: *Window, action: keymap.Action, lsp_client: *lsp.LspClient, lsp_sync: *bool) void {
     switch (action) {
         .move_left => {
             editor.cursor.moveLeft(&editor.buffer, false);
@@ -932,23 +954,23 @@ fn handleAction(editor: *EditorView, win: *Window, action: keymap.Action, lsp_cl
             if (!pair_deleted) {
                 editor.backspace() catch {};
             }
-            lsp_ops.notifyLspChange(editor, lsp_client, allocator);
+            lsp_sync.* = true;
         },
         .delete => {
             editor.deleteForward() catch {};
-            lsp_ops.notifyLspChange(editor, lsp_client, allocator);
+            lsp_sync.* = true;
         },
         .delete_word_left => {
             editor.deleteWordLeft() catch {};
-            lsp_ops.notifyLspChange(editor, lsp_client, allocator);
+            lsp_sync.* = true;
         },
         .delete_word_right => {
             editor.deleteWordRight() catch {};
-            lsp_ops.notifyLspChange(editor, lsp_client, allocator);
+            lsp_sync.* = true;
         },
         .enter => {
             editor.insertNewline() catch {};
-            lsp_ops.notifyLspChange(editor, lsp_client, allocator);
+            lsp_sync.* = true;
         },
         .tab => {
             if (editor.cursor.primary().hasSelection()) {
@@ -956,7 +978,7 @@ fn handleAction(editor: *EditorView, win: *Window, action: keymap.Action, lsp_cl
             } else {
                 editor.insertAtCursor("    ") catch {};
             }
-            lsp_ops.notifyLspChange(editor, lsp_client, allocator);
+            lsp_sync.* = true;
         },
         .copy => {
             if (editor.getSelectedText()) |text| {
@@ -967,7 +989,7 @@ fn handleAction(editor: *EditorView, win: *Window, action: keymap.Action, lsp_cl
             if (editor.getSelectedText()) |text| {
                 win.setClipboard(text);
                 editor.deleteSelection() catch {};
-                lsp_ops.notifyLspChange(editor, lsp_client, allocator);
+                lsp_sync.* = true;
             }
         },
         .paste => {
@@ -975,10 +997,12 @@ fn handleAction(editor: *EditorView, win: *Window, action: keymap.Action, lsp_cl
         },
         .undo => {
             _ = editor.buffer.undo() catch {};
+            lsp_sync.* = true;
             editor.markAllDirty();
         },
         .redo => {
             _ = editor.buffer.redo() catch {};
+            lsp_sync.* = true;
             editor.markAllDirty();
         },
         .save => {
@@ -1021,19 +1045,19 @@ fn handleAction(editor: *EditorView, win: *Window, action: keymap.Action, lsp_cl
         },
         .duplicate_line => {
             editor.duplicateLine() catch {};
-            lsp_ops.notifyLspChange(editor, lsp_client, allocator);
+            lsp_sync.* = true;
         },
         .move_line_up => {
             editor.moveLineUp() catch {};
-            lsp_ops.notifyLspChange(editor, lsp_client, allocator);
+            lsp_sync.* = true;
         },
         .move_line_down => {
             editor.moveLineDown() catch {};
-            lsp_ops.notifyLspChange(editor, lsp_client, allocator);
+            lsp_sync.* = true;
         },
         .delete_line => {
             editor.deleteLine() catch {};
-            lsp_ops.notifyLspChange(editor, lsp_client, allocator);
+            lsp_sync.* = true;
         },
         // These are handled before reaching handleAction
         .command_palette, .finder_files, .find, .goto_line, .find_in_project, .find_replace => {},
@@ -1045,26 +1069,26 @@ fn handleAction(editor: *EditorView, win: *Window, action: keymap.Action, lsp_cl
         .rename_symbol, .code_action, .goto_references => {},
         .toggle_comment => {
             editor.toggleComment() catch {};
-            lsp_ops.notifyLspChange(editor, lsp_client, allocator);
+            lsp_sync.* = true;
         },
         .select_line => {
             editor.selectLine();
         },
         .join_lines => {
             editor.joinLines() catch {};
-            lsp_ops.notifyLspChange(editor, lsp_client, allocator);
+            lsp_sync.* = true;
         },
         .insert_line_below => {
             editor.insertLineBelow() catch {};
-            lsp_ops.notifyLspChange(editor, lsp_client, allocator);
+            lsp_sync.* = true;
         },
         .insert_line_above => {
             editor.insertLineAbove() catch {};
-            lsp_ops.notifyLspChange(editor, lsp_client, allocator);
+            lsp_sync.* = true;
         },
         .outdent_lines => {
             editor.outdentSelectedLines() catch {};
-            lsp_ops.notifyLspChange(editor, lsp_client, allocator);
+            lsp_sync.* = true;
         },
         .goto_file_start => {
             editor.cursor.moveTo(0);
@@ -1561,6 +1585,7 @@ fn handleOverlayKey(
     replace_buf: *[256]u8,
     replace_len: *u32,
     replace_field_active: *bool,
+    lsp_sync: *bool,
 ) void {
     const keysym = ke.keysym;
     const editor = pane_mgr.active_leaf;
@@ -1638,7 +1663,7 @@ fn handleOverlayKey(
                 const replacement = replace_buf[0..replace_len.*];
                 if (query.len > 0) {
                     search_ops.replaceCurrentAndFindNext(editor, query, replacement, allocator);
-                    lsp_ops.notifyLspChange(editor, lsp_client, allocator);
+                    lsp_sync.* = true;
                 }
                 // Don't close overlay -- allow multiple replacements
                 editor.markAllDirty();
@@ -1686,7 +1711,7 @@ fn handleOverlayKey(
                         if (ca.edits.items.len > 0) {
                             // Apply edits to the current file (same-file only)
                             lsp_ops.applyCodeActionEdits(editor, ca.edits.items);
-                            lsp_ops.notifyLspChange(editor, lsp_client, allocator);
+                            lsp_sync.* = true;
                         }
                     }
                 }
