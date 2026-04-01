@@ -135,9 +135,10 @@ pub fn main() !void {
     file_tree.visible = true;
     file_tree.populate() catch |err| logError("file tree populate", err);
 
-    // Terminal panel
+    // Terminal panel (XEmbed: embeds a real terminal emulator)
     var terminal = try Terminal.init(allocator);
     defer terminal.deinit();
+    terminal.setup(win.getConnection(), win.getWindowId());
 
     // LSP client
     var lsp_client = lsp.LspClient.init(allocator);
@@ -227,7 +228,6 @@ pub fn main() !void {
     var running = true;
     var mouse_dragging = false;
     var minimap_dragging = false;
-    var pty_registered: ?std.posix.fd_t = null; // Track registered PTY fd
 
     // Initial layout (account for sidebar + terminal)
     relayoutWithTerminal(&pane_mgr, &file_tree, &terminal, tab_bar_h, win.width, win.height, &font);
@@ -308,30 +308,11 @@ pub fn main() !void {
                                     if (keymap.mapKey(ke.keysym, mod)) |action| {
                                         if (action == .toggle_terminal) {
                                             terminal.toggle();
-                                            // Register/deregister PTY fd with epoll
-                                            if (terminal.visible) {
-                                                if (terminal.getPtyFd()) |pty_fd| {
-                                                    if (pty_registered == null) {
-                                                        var pty_ev = std.os.linux.epoll_event{
-                                                            .events = std.os.linux.EPOLL.IN,
-                                                            .data = .{ .u32 = 3 },
-                                                        };
-                                                        std.posix.epoll_ctl(epoll_fd, std.os.linux.EPOLL.CTL_ADD, pty_fd, &pty_ev) catch |err| logError("PTY epoll register", err);
-                                                        pty_registered = pty_fd;
-                                                    }
-                                                }
-                                            } else {
-                                                if (pty_registered) |reg_fd| {
-                                                    std.posix.epoll_ctl(epoll_fd, std.os.linux.EPOLL.CTL_DEL, reg_fd, null) catch {}; // non-fatal: epoll cleanup
-                                                    pty_registered = null;
-                                                }
-                                            }
                                             relayoutWithTerminal(&pane_mgr, &file_tree, &terminal, tab_bar_h, win.width, win.height, &font);
                                             markAllPanesDirty(&pane_mgr);
                                         } else if (terminal.focused) {
-                                            // Terminal is focused: only Ctrl+` escapes, rest goes to PTY
-                                            // (handled above as toggle_terminal)
-                                            _ = terminal.handleKey(ke.keysym, ke.modifiers.ctrl, ke.modifiers.shift);
+                                            // Terminal is focused: only Ctrl+` escapes back to editor
+                                            // All other keys are delivered by X11 directly to the child window
                                         } else {
                                         switch (action) {
                                             .command_palette => openCommandPalette(&mode, &overlay, &filtered_display, allocator),
@@ -434,8 +415,7 @@ pub fn main() !void {
                                         resetCursorBlink(editor);
                                         // IME position: ext_move disabled for stability
                                     } else if (terminal.focused) {
-                                        // Unmapped key while terminal focused -- send raw
-                                        _ = terminal.handleKey(ke.keysym, ke.modifiers.ctrl, ke.modifiers.shift);
+                                        // Terminal focused: X11 delivers keys to child window directly
                                     }
                                 }
                             },
@@ -456,7 +436,7 @@ pub fn main() !void {
                                     }
                                     editor.markAllDirty();
                                 } else if (terminal.focused) {
-                                    terminal.handleTextInput(te.slice());
+                                    // Terminal focused: X11 delivers text to child window directly
                                 } else {
                                     if (completion_active) {
                                         completion_active = false;
@@ -509,29 +489,20 @@ pub fn main() !void {
                             .expose => markAllPanesDirty(&pane_mgr),
 
                             .scroll => |s| {
-                                if (terminal.focused) {
-                                    // Forward scroll to terminal for mouse-aware apps
-                                    terminal.handleScroll(s.delta, 0, 0);
-                                } else {
+                                if (!terminal.focused) {
                                     handleScroll(editor, s.delta);
                                 }
+                                // When terminal focused, X11 delivers scroll to child window
                             },
 
                             .mouse_press => |me| {
                                 if (terminal.containsPoint(me.x, me.y)) {
-                                    terminal.focused = true;
-                                    // Forward mouse press to terminal if mouse tracking is on
-                                    if (terminal.pixelToCell(me.x, me.y, &font)) |cell| {
-                                        const button: u8 = switch (me.button) {
-                                            .left => 0,
-                                            .middle => 1,
-                                            .right => 2,
-                                            .none => 0,
-                                        };
-                                        terminal.handleMouseEvent(button, cell.col, cell.row, true, false);
-                                    }
+                                    // Click in terminal area: set X focus to child window
+                                    terminal.setFocus();
                                 } else if (me.button == .left) {
-                                    terminal.focused = false;
+                                    if (terminal.focused) {
+                                        terminal.unfocus();
+                                    }
                                     const sw = file_tree.sidebarWidth(&font);
                                     if (file_tree.visible and me.x >= 0 and me.x < @as(i32, @intCast(sw))) {
                                         // Click in file tree sidebar
@@ -548,7 +519,7 @@ pub fn main() !void {
                                         syncPaneToActiveTab(&pane_mgr, &tab_mgr);
                                         recomputeGitDiff(&git_info, tab_mgr.activeView());
                                         file_tree.active_path = if (pane_mgr.active_leaf.file_path) |p| p else null;
-                                    } else if (handleStatusBarClick(pane_mgr.active_leaf, me.x, me.y, &terminal, epoll_fd, &pty_registered, &pane_mgr, &file_tree, tab_bar_h, win.width, win.height, &font)) {
+                                    } else if (handleStatusBarClick(pane_mgr.active_leaf, me.x, me.y, &terminal, &pane_mgr, &file_tree, tab_bar_h, win.width, win.height, &font)) {
                                         // Status bar button was clicked — handled above
                                         markAllPanesDirty(&pane_mgr);
                                     } else {
@@ -581,17 +552,7 @@ pub fn main() !void {
                             },
 
                             .mouse_release => |me| {
-                                if (terminal.focused) {
-                                    if (terminal.pixelToCell(me.x, me.y, &font)) |cell| {
-                                        const button: u8 = switch (me.button) {
-                                            .left => 0,
-                                            .middle => 1,
-                                            .right => 2,
-                                            .none => 0,
-                                        };
-                                        terminal.handleMouseEvent(button, cell.col, cell.row, false, false);
-                                    }
-                                } else if (me.button == .left) {
+                                if (!terminal.focused and me.button == .left) {
                                     mouse_dragging = false;
                                     minimap_dragging = false;
                                     const active = pane_mgr.active_leaf;
@@ -599,15 +560,11 @@ pub fn main() !void {
                                         win.setClipboard(text);
                                     }
                                 }
+                                // When terminal focused, X11 delivers mouse events to child window
                             },
 
                             .mouse_motion => |me| {
-                                if (terminal.focused and terminal.wantsMotionEvents()) {
-                                    if (terminal.pixelToCell(me.x, me.y, &font)) |cell| {
-                                        // button 32 = motion with no button held
-                                        terminal.handleMouseEvent(32, cell.col, cell.row, true, true);
-                                    }
-                                } else if (minimap_dragging) {
+                                if (minimap_dragging) {
                                     const active = pane_mgr.active_leaf;
                                     active.handleMinimapClick(me.y, &font);
                                 } else if (mouse_dragging) {
@@ -616,17 +573,17 @@ pub fn main() !void {
                                     active.cursor.selectTo(pos);
                                     active.markAllDirty();
                                 }
+                                // When terminal focused, X11 delivers motion to child window
                             },
 
                             .paste => |pe| {
-                                if (terminal.focused) {
-                                    terminal.handlePaste(pe.data);
-                                } else {
+                                if (!terminal.focused) {
                                     const active = pane_mgr.active_leaf;
                                     active.insertAtCursor(pe.data) catch {}; // OOM: paste best-effort
                                     lsp_needs_sync = true;
                                     resetCursorBlink(editor);
                                 }
+                                // When terminal focused, terminal handles its own clipboard
                                 pe.deinit();
                             },
 
@@ -776,10 +733,6 @@ pub fn main() !void {
                     }
                 },
 
-                3 => { // PTY output
-                    terminal.processOutput();
-                },
-
                 else => {},
             }
         }
@@ -898,8 +851,6 @@ fn handleStatusBarClick(
     mx: i32,
     my: i32,
     term: *Terminal,
-    epoll_fd: std.posix.fd_t,
-    pty_registered: *?std.posix.fd_t,
     pane_mgr: *PaneManager,
     file_tree: *FileTree,
     tab_bar_h: u32,
@@ -918,24 +869,6 @@ fn handleStatusBarClick(
         px < editor.status_btn_terminal_x + editor.status_btn_terminal_w)
     {
         term.toggle();
-        // Register/deregister PTY fd with epoll
-        if (term.visible) {
-            if (term.getPtyFd()) |pty_fd| {
-                if (pty_registered.* == null) {
-                    var pty_ev = std.os.linux.epoll_event{
-                        .events = std.os.linux.EPOLL.IN,
-                        .data = .{ .u32 = 3 },
-                    };
-                    std.posix.epoll_ctl(epoll_fd, std.os.linux.EPOLL.CTL_ADD, pty_fd, &pty_ev) catch |err| logError("PTY epoll register", err);
-                    pty_registered.* = pty_fd;
-                }
-            }
-        } else {
-            if (pty_registered.*) |reg_fd| {
-                std.posix.epoll_ctl(epoll_fd, std.os.linux.EPOLL.CTL_DEL, reg_fd, null) catch {}; // non-fatal
-                pty_registered.* = null;
-            }
-        }
         relayoutWithTerminal(pane_mgr, file_tree, term, tab_bar_h, win_w, win_h, font);
         return true;
     }

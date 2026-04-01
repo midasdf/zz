@@ -871,6 +871,18 @@ pub const Window = struct {
         return c.xcb_get_file_descriptor(self.connection);
     }
 
+    // ── Accessors for terminal embedding ────────────────────────────
+
+    /// Return the xcb connection as an opaque pointer (for terminal embedding,
+    /// which uses a separate @cImport and thus has an incompatible type).
+    pub fn getConnection(self: *Window) *anyopaque {
+        return self.connection;
+    }
+
+    pub fn getWindowId(self: *const Window) u32 {
+        return self.window;
+    }
+
     // ── Clipboard ────────────────────────────────────────────────────
 
     pub fn requestClipboard(self: *Window) void {
