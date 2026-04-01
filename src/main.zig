@@ -1867,11 +1867,14 @@ fn openFileInTab(tab_mgr: *TabManager, allocator: std.mem.Allocator, path: []con
 
     // Read the file
     const new_content = std.fs.cwd().readFileAlloc(allocator, path, 100 * 1024 * 1024) catch return;
-    defer allocator.free(new_content);
 
-    // Create a new tab
+    // Create a new tab — PieceTable references new_content as `original`
     const tab_bar_h = view_mod.tabBarHeight(font);
-    const view = tab_mgr.addTab(new_content, path) catch return;
+    const view = tab_mgr.addTab(new_content, path) catch {
+        allocator.free(new_content);
+        return;
+    };
+    view.buffer.owned_original = new_content; // Transfer ownership to PieceTable
     view.y_offset = tab_bar_h;
     view.initHighlighting();
     view.git_info = git_info;
