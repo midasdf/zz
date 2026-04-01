@@ -909,7 +909,11 @@ fn handleAction(editor: *EditorView, win: *Window, action: keymap.Action, lsp_cl
             notifyLspChange(editor, lsp_client, allocator);
         },
         .tab => {
-            editor.insertAtCursor("    ") catch {};
+            if (editor.cursor.primary().hasSelection()) {
+                editor.indentSelectedLines() catch {};
+            } else {
+                editor.insertAtCursor("    ") catch {};
+            }
             notifyLspChange(editor, lsp_client, allocator);
         },
         .copy => {
@@ -1016,6 +1020,35 @@ fn handleAction(editor: *EditorView, win: *Window, action: keymap.Action, lsp_cl
         .insert_line_above => {
             editor.insertLineAbove() catch {};
             notifyLspChange(editor, lsp_client, allocator);
+        },
+        .outdent_lines => {
+            editor.outdentSelectedLines() catch {};
+            notifyLspChange(editor, lsp_client, allocator);
+        },
+        .goto_file_start => {
+            editor.cursor.moveTo(0);
+            editor.scroll_line = 0;
+            editor.markAllDirty();
+        },
+        .goto_file_end => {
+            editor.cursor.moveTo(editor.buffer.total_len);
+            editor.ensureCursorVisible();
+            editor.markAllDirty();
+        },
+        .scroll_up => {
+            if (editor.scroll_line > 0) {
+                editor.scroll_line -= 1;
+                editor.markAllDirty();
+            }
+        },
+        .scroll_down => {
+            if (editor.scroll_line + editor.visible_rows < editor.buffer.lineCount()) {
+                editor.scroll_line += 1;
+                editor.markAllDirty();
+            }
+        },
+        .goto_matching_bracket => {
+            editor.gotoMatchingBracket();
         },
         .switch_theme => {
             view_mod.cycleTheme();

@@ -104,6 +104,16 @@ pub const Action = enum {
     insert_line_above,
     // Theme switcher
     switch_theme,
+    // Indent/outdent
+    outdent_lines,
+    // File navigation
+    goto_file_start,
+    goto_file_end,
+    // Scroll without cursor
+    scroll_up,
+    scroll_down,
+    // Bracket matching
+    goto_matching_bracket,
 };
 
 pub fn modFromWindow(mods: Window.Modifiers) Modifier {
@@ -123,6 +133,12 @@ pub fn mapKey(keysym: u32, mods: Modifier) ?Action {
         if (keysym == Window.XK_Delete) return .delete_word_right;
         // Ctrl+Tab -> next tab
         if (keysym == Window.XK_Tab) return .next_tab;
+        // Ctrl+Home / Ctrl+End -> file start/end
+        if (keysym == Window.XK_Home) return .goto_file_start;
+        if (keysym == Window.XK_End) return .goto_file_end;
+        // Ctrl+Up / Ctrl+Down -> scroll without moving cursor
+        if (keysym == Window.XK_Up) return .scroll_up;
+        if (keysym == Window.XK_Down) return .scroll_down;
         // Ctrl+\ -> split vertical
         if (keysym == Window.XK_backslash) return .split_vertical;
         // Ctrl+` -> toggle terminal
@@ -153,6 +169,7 @@ pub fn mapKey(keysym: u32, mods: Modifier) ?Action {
             'g' => .goto_line,
             'j' => .join_lines,
             'l' => .select_line,
+            'm' => .goto_matching_bracket,
             else => null,
         };
     }
@@ -190,6 +207,8 @@ pub fn mapKey(keysym: u32, mods: Modifier) ?Action {
 
     // Shift+arrow = selection, Shift+F12 = goto references
     if (mods == .shift) {
+        // Shift+Tab -> outdent lines
+        if (keysym == Window.XK_ISO_Left_Tab or keysym == Window.XK_Tab) return .outdent_lines;
         return switch (keysym) {
             Window.XK_Left => .select_left,
             Window.XK_Right => .select_right,

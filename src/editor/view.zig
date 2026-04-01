@@ -2505,6 +2505,79 @@ pub const EditorView = struct {
         }
         return false;
     }
+
+    // ── Indent / Outdent selected lines ─────────────────────────────
+
+    pub fn indentSelectedLines(self: *EditorView) !void {
+        const sel = self.cursor.primary();
+        if (!sel.hasSelection()) return;
+
+        const start_lc = self.buffer.offsetToLineCol(sel.start());
+        const end_lc = self.buffer.offsetToLineCol(sel.end() -| 1);
+
+        // Process back-to-front to preserve earlier offsets
+        var line = end_lc.line + 1;
+        while (line > start_lc.line) {
+            line -= 1;
+            const line_start = self.buffer.lineToOffset(line);
+            try self.buffer.insert(line_start, "    ");
+            self.highlighter.notifyEdit(&self.buffer, line_start, line_start, line_start + 4);
+        }
+
+        // Adjust selection to cover the indented range
+        const lines_count = end_lc.line - start_lc.line + 1;
+        const cur = &self.cursor.cursors.items[0];
+        if (cur.anchor <= cur.head) {
+            cur.anchor = cur.anchor + 4;
+            cur.head = cur.head + lines_count * 4;
+        } else {
+            cur.head = cur.head + 4;
+            cur.anchor = cur.anchor + lines_count * 4;
+        }
+
+        self.modified = true;
+        self.markAllDirty();
+    }
+
+    pub fn outdentSelectedLines(self: *EditorView) !void {
+        const sel = self.cursor.primary();
+        const start_lc = self.buffer.offsetToLineCol(if (sel.hasSelection()) sel.start() else sel.head);
+        const end_lc = self.buffer.offsetToLineCol(if (sel.hasSelection()) sel.end() -| 1 else sel.head);
+
+        // Process back-to-front to preserve earlier offsets
+        var line = end_lc.line + 1;
+        while (line > start_lc.line) {
+            line -= 1;
+            const line_start = self.buffer.lineToOffset(line);
+            // Count up to 4 leading spaces to remove
+            var remove: u32 = 0;
+            var off = line_start;
+            while (remove < 4 and off < self.buffer.total_len) {
+                const s = self.buffer.contiguousSliceAt(off);
+                if (s.len == 0 or s[0] != ' ') break;
+                remove += 1;
+                off += 1;
+            }
+            if (remove > 0) {
+                try self.buffer.delete(line_start, remove);
+                self.highlighter.notifyEdit(&self.buffer, line_start, line_start + remove, line_start);
+            }
+        }
+
+        self.modified = true;
+        self.markAllDirty();
+        self.ensureCursorVisible();
+    }
+
+    // ── Go to matching bracket ──────────────────────────────────────
+
+    pub fn gotoMatchingBracket(self: *EditorView) void {
+        if (self.findMatchingBracket()) |match_pos| {
+            self.cursor.moveTo(match_pos);
+            self.ensureCursorVisible();
+            self.markAllDirty();
+        }
+    }
 };
 
 // ── Tab bar rendering ─────────────────────────────────────────────
