@@ -63,6 +63,8 @@ pub const EditorView = struct {
     render_width: u32 = 0, // Pane width (0 = use renderer.width)
     minimap_visible: bool = true,
     minimap_width: u32 = 60, // pixels
+    word_wrap: bool = false,
+    sticky_scroll_visible: bool = true,
     folded_lines: std.AutoHashMap(u32, u32), // start_line -> end_line (exclusive)
 
     pub fn init(allocator: std.mem.Allocator, content: []const u8) !EditorView {
@@ -814,6 +816,9 @@ pub const EditorView = struct {
             doc_line += 1;
         }
 
+        // -- Sticky scroll (scope header pinned to top) --
+        self.renderStickyScroll(renderer, font);
+
         // -- Minimap (code overview on right edge) --
         self.renderMinimap(renderer, font);
 
@@ -822,6 +827,83 @@ pub const EditorView = struct {
 
         // -- Status bar --
         self.renderStatusBar(renderer, font, cursor_lc.line, cursor_lc.col);
+    }
+
+    // ── Sticky Scroll (scope header pinned to top) ─────────────────
+
+    fn renderStickyScroll(self: *const EditorView, renderer: *Renderer, font: *FontFace) void {
+        if (!self.sticky_scroll_visible) return;
+        // Only show when scrolled past the first line
+        if (self.scroll_line == 0) return;
+
+        const cell_w = font.cell_width;
+        const cell_h = font.cell_height;
+        if (cell_w == 0 or cell_h == 0) return;
+
+        const xo = self.x_offset;
+        const pw = self.paneWidth(renderer.width);
+        const gw = self.gutterWidth(font);
+        const code_x = xo + gw;
+        const sticky_y = self.y_offset;
+
+        // Find the enclosing scope for the top visible line by walking
+        // backward and tracking brace depth. The first line we find where
+        // depth goes negative (more '{' than '}') is our scope header.
+        var scope_line: ?u32 = null;
+        var depth: i32 = 0;
+        var search_line = self.scroll_line;
+        const max_search: u32 = @min(search_line, 200);
+        var searched: u32 = 0;
+        while (search_line > 0 and searched < max_search) {
+            search_line -= 1;
+            searched += 1;
+            const ls = self.buffer.lineToOffset(search_line);
+            const le = if (search_line + 1 < self.buffer.lineCount())
+                self.buffer.lineToOffset(search_line + 1)
+            else
+                self.buffer.total_len;
+
+            var line_has_open = false;
+            var off = ls;
+            while (off < le) {
+                const s = self.buffer.contiguousSliceAt(off);
+                if (s.len == 0) break;
+                const remaining: u32 = le - off;
+                const n = @min(@as(u32, @intCast(s.len)), remaining);
+                for (s[0..n]) |byte| {
+                    if (byte == '{') {
+                        depth -= 1;
+                        line_has_open = true;
+                    } else if (byte == '}') {
+                        depth += 1;
+                    }
+                }
+                off += n;
+            }
+            if (depth < 0 and line_has_open) {
+                scope_line = search_line;
+                break;
+            }
+        }
+
+        const sl = scope_line orelse return;
+
+        // Don't show sticky scroll if the scope line is visible on screen
+        if (sl >= self.scroll_line and sl < self.scroll_line + self.visible_rows) return;
+
+        // Background overlay
+        renderer.fillRect(xo, sticky_y, pw, cell_h, theme.mantle);
+
+        // Render gutter number for the scope line
+        self.renderGutterNumber(renderer, font, sl, 0, false);
+
+        // Render code content
+        const line_start = self.buffer.lineToOffset(sl);
+        var empty_wh: [0]WordHighlight = undefined;
+        self.renderCodeLine(renderer, font, line_start, sl, 0, code_x, theme.mantle, false, &empty_wh);
+
+        // Bottom border
+        renderer.fillRect(xo, sticky_y + cell_h - 1, pw, 1, theme.surface2);
     }
 
     // ── Minimap ────────────────────────────────────────────────────
@@ -1287,12 +1369,21 @@ pub const EditorView = struct {
             }
         }
 
-        // File path
+        // File path with breadcrumb separators (/ -> " > ")
         const name = self.file_path orelse "[untitled]";
         for (name) |ch| {
             if (left_col >= self.visible_cols) break;
-            self.drawStatusChar(renderer, font, ch, left_col, text_y, theme.subtext0);
-            left_col += 1;
+            if (ch == '/' or ch == '\\') {
+                // Render " > " separator instead of slash
+                for (" > ") |sep_ch| {
+                    if (left_col >= self.visible_cols) break;
+                    self.drawStatusChar(renderer, font, sep_ch, left_col, text_y, theme.overlay0);
+                    left_col += 1;
+                }
+            } else {
+                self.drawStatusChar(renderer, font, ch, left_col, text_y, theme.subtext0);
+                left_col += 1;
+            }
         }
 
         if (self.modified) {

@@ -375,6 +375,10 @@ pub fn main() !void {
                                                 editor.minimap_visible = !editor.minimap_visible;
                                                 editor.markAllDirty();
                                             },
+                                            .toggle_word_wrap => {
+                                                editor.word_wrap = !editor.word_wrap;
+                                                editor.markAllDirty();
+                                            },
                                             .toggle_terminal => unreachable,
                                             else => handleAction(editor, &win, action, &lsp_client, allocator),
                                         }
@@ -940,7 +944,7 @@ fn handleAction(editor: *EditorView, win: *Window, action: keymap.Action, lsp_cl
         .trigger_completion, .format_document => {},
         .next_tab, .prev_tab, .close_tab => {},
         .split_vertical, .split_horizontal, .focus_next_pane, .close_pane => {},
-        .toggle_sidebar, .toggle_terminal, .toggle_minimap => {},
+        .toggle_sidebar, .toggle_terminal, .toggle_minimap, .toggle_word_wrap => {},
         .goto_symbol, .toggle_fold => {},
         .toggle_comment => {
             editor.toggleComment() catch {};

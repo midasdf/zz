@@ -88,6 +88,8 @@ pub const Action = enum {
     toggle_comment,
     // Select line
     select_line,
+    // Word wrap
+    toggle_word_wrap,
 };
 
 pub fn modFromWindow(mods: Window.Modifiers) Modifier {
@@ -158,6 +160,8 @@ pub fn mapKey(keysym: u32, mods: Modifier) ?Action {
         // Alt+Up/Down -> move line up/down
         if (keysym == Window.XK_Up) return .move_line_up;
         if (keysym == Window.XK_Down) return .move_line_down;
+        // Alt+Z -> toggle word wrap
+        if (keysym == 'z' or keysym == 'Z') return .toggle_word_wrap;
     }
 
     // Shift+arrow = selection
