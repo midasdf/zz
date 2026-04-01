@@ -891,6 +891,14 @@ fn handleAction(editor: *EditorView, win: *Window, action: keymap.Action, lsp_cl
             notifyLspChange(editor, lsp_client, allocator);
             editor.markAllDirty();
         },
+        .delete_word_left => {
+            editor.deleteWordLeft() catch {};
+            notifyLspChange(editor, lsp_client, allocator);
+        },
+        .delete_word_right => {
+            editor.deleteWordRight() catch {};
+            notifyLspChange(editor, lsp_client, allocator);
+        },
         .enter => {
             editor.insertNewline() catch {};
             notifyLspChange(editor, lsp_client, allocator);
@@ -1055,17 +1063,58 @@ fn handleScroll(editor: *EditorView, delta: i32) void {
     editor.markAllDirty();
 }
 
+fn trimTrailingWhitespace(content: []u8) []u8 {
+    // In-place trim: remove trailing spaces/tabs before newlines and at end of file
+    var write: usize = 0;
+    var line_start: usize = 0;
+    var read: usize = 0;
+
+    while (read < content.len) : (read += 1) {
+        if (content[read] == '\n') {
+            // Trim trailing whitespace from this line
+            var line_end = read;
+            while (line_end > line_start and (content[line_end - 1] == ' ' or content[line_end - 1] == '\t')) {
+                line_end -= 1;
+            }
+            const len = line_end - line_start;
+            if (write != line_start) {
+                std.mem.copyForwards(u8, content[write..][0..len], content[line_start..][0..len]);
+            }
+            write += len;
+            content[write] = '\n';
+            write += 1;
+            line_start = read + 1;
+        }
+    }
+    // Last line (no trailing newline)
+    if (read > line_start) {
+        var line_end = read;
+        while (line_end > line_start and (content[line_end - 1] == ' ' or content[line_end - 1] == '\t')) {
+            line_end -= 1;
+        }
+        const len = line_end - line_start;
+        if (write != line_start) {
+            std.mem.copyForwards(u8, content[write..][0..len], content[line_start..][0..len]);
+        }
+        write += len;
+    }
+    return content[0..write];
+}
+
 fn saveFile(editor: *EditorView) void {
     const path = editor.file_path orelse return;
     const content = editor.buffer.collectContent(editor.allocator) catch return;
     defer editor.allocator.free(content);
+
+    // Trim trailing whitespace before saving
+    const trimmed = trimTrailingWhitespace(content);
 
     // Atomic save: write to temp, rename
     var tmp_buf: [512]u8 = undefined;
     const tmp_path = std.fmt.bufPrint(&tmp_buf, "{s}.zz-tmp", .{path}) catch return;
 
     const file = std.fs.cwd().createFile(tmp_path, .{}) catch return;
-    file.writeAll(content) catch {
+    file.writeAll(trimmed) catch {
         file.close();
         std.fs.cwd().deleteFile(tmp_path) catch {};
         return;
@@ -1073,6 +1122,23 @@ fn saveFile(editor: *EditorView) void {
     file.close();
 
     std.fs.cwd().rename(tmp_path, path) catch return;
+
+    // If trimming changed the content, reload the buffer to reflect trimmed state
+    if (trimmed.len != content.len) {
+        editor.buffer.deinit();
+        editor.buffer = PieceTable.init(editor.allocator, trimmed) catch {
+            // If reinit fails, just mark as saved anyway
+            editor.modified = false;
+            editor.markAllDirty();
+            return;
+        };
+        // Clamp cursor position to valid range
+        const cur = editor.cursor.primary();
+        if (cur.head > editor.buffer.total_len) {
+            editor.cursor.moveTo(editor.buffer.total_len);
+        }
+        editor.highlighter.parse(&editor.buffer);
+    }
     editor.modified = false;
 
     // Recompute git diff after save

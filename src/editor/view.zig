@@ -313,6 +313,139 @@ pub const EditorView = struct {
         self.markAllDirty();
     }
 
+    pub fn deleteWordLeft(self: *EditorView) !void {
+        const sel = self.cursor.primary();
+        if (sel.hasSelection()) {
+            try self.deleteSelection();
+            return;
+        }
+
+        const pos = sel.head;
+        if (pos == 0) return;
+
+        var new_pos = pos - 1;
+
+        // Skip whitespace first (but stop at newline)
+        while (new_pos > 0) {
+            const s = self.buffer.contiguousSliceAt(new_pos);
+            if (s.len == 0) break;
+            if (s[0] == '\n') break;
+            if (s[0] != ' ' and s[0] != '\t') break;
+            new_pos -= 1;
+        }
+
+        // Check if we landed on a newline -- just delete back to it
+        {
+            const s = self.buffer.contiguousSliceAt(new_pos);
+            if (s.len > 0 and s[0] == '\n') {
+                // If we only skipped whitespace to hit newline, delete up to (not including) newline
+                if (new_pos + 1 < pos) {
+                    // Delete the whitespace between newline and original pos
+                    const del_start = new_pos + 1;
+                    try self.buffer.delete(del_start, pos - del_start);
+                    self.highlighter.notifyEdit(&self.buffer, del_start, pos, del_start);
+                    self.cursor.moveTo(del_start);
+                } else {
+                    // Cursor was right after newline, delete the newline
+                    try self.buffer.delete(new_pos, 1);
+                    self.highlighter.notifyEdit(&self.buffer, new_pos, new_pos + 1, new_pos);
+                    self.cursor.moveTo(new_pos);
+                }
+                self.modified = true;
+                self.markAllDirty();
+                self.ensureCursorVisible();
+                return;
+            }
+        }
+
+        // Then skip word chars
+        while (new_pos > 0) {
+            const prev = self.buffer.contiguousSliceAt(new_pos - 1);
+            if (prev.len == 0) break;
+            if (!isWordChar(prev[0])) break;
+            new_pos -= 1;
+        }
+        // Check current position too
+        {
+            const s = self.buffer.contiguousSliceAt(new_pos);
+            if (s.len > 0 and !isWordChar(s[0]) and new_pos + 1 < pos) {
+                // We're on a non-word char after skipping whitespace;
+                // the word ends at new_pos+1, but if we started on a non-word char
+                // we should delete just the non-word chars
+                new_pos += 1;
+            }
+        }
+
+        if (new_pos < pos) {
+            try self.buffer.delete(new_pos, pos - new_pos);
+            self.highlighter.notifyEdit(&self.buffer, new_pos, pos, new_pos);
+            self.cursor.moveTo(new_pos);
+            self.modified = true;
+            self.markAllDirty();
+            self.ensureCursorVisible();
+        }
+    }
+
+    pub fn deleteWordRight(self: *EditorView) !void {
+        const sel = self.cursor.primary();
+        if (sel.hasSelection()) {
+            try self.deleteSelection();
+            return;
+        }
+
+        const pos = sel.head;
+        if (pos >= self.buffer.total_len) return;
+
+        var end_pos = pos;
+
+        // Check what we're starting on
+        const first = self.buffer.contiguousSliceAt(pos);
+        if (first.len == 0) return;
+
+        if (first[0] == '\n') {
+            // Just delete the newline
+            try self.buffer.delete(pos, 1);
+            self.highlighter.notifyEdit(&self.buffer, pos, pos + 1, pos);
+            self.modified = true;
+            self.markAllDirty();
+            return;
+        }
+
+        if (isWordChar(first[0])) {
+            // Skip word chars first
+            while (end_pos < self.buffer.total_len) {
+                const s = self.buffer.contiguousSliceAt(end_pos);
+                if (s.len == 0) break;
+                if (!isWordChar(s[0])) break;
+                end_pos += 1;
+            }
+            // Then skip trailing whitespace (but not newlines)
+            while (end_pos < self.buffer.total_len) {
+                const s = self.buffer.contiguousSliceAt(end_pos);
+                if (s.len == 0) break;
+                if (s[0] != ' ' and s[0] != '\t') break;
+                end_pos += 1;
+            }
+        } else {
+            // On whitespace or punctuation: skip non-word, non-newline chars
+            while (end_pos < self.buffer.total_len) {
+                const s = self.buffer.contiguousSliceAt(end_pos);
+                if (s.len == 0) break;
+                if (s[0] == '\n') break;
+                if (isWordChar(s[0])) break;
+                end_pos += 1;
+            }
+        }
+
+        if (end_pos > pos) {
+            const del_len = end_pos - pos;
+            try self.buffer.delete(pos, del_len);
+            self.highlighter.notifyEdit(&self.buffer, pos, pos + del_len, pos);
+            self.modified = true;
+            self.markAllDirty();
+        }
+    }
+
     pub fn deleteSelection(self: *EditorView) !void {
         if (self.cursor.cursorCount() <= 1) {
             // Fast path: single cursor
@@ -1144,6 +1277,7 @@ pub const EditorView = struct {
 
         var col: u32 = 0;
         var offset = line_start_offset;
+        var last_non_ws_col: u32 = 0; // Track last non-whitespace column for trailing ws highlight
 
         while (col < self.visible_cols) {
             if (offset >= self.buffer.total_len) break;
@@ -1189,6 +1323,7 @@ pub const EditorView = struct {
                 const glyph_x = @as(i32, @intCast(px_x)) + glyph.bearing_x;
                 const glyph_y = @as(i32, @intCast(row_y)) + font.ascent - glyph.bearing_y;
                 renderer.drawGlyph(glyph, glyph_x, glyph_y, fg);
+                if (byte != ' ') last_non_ws_col = col + 1;
                 col += 1;
                 offset += 1;
             } else {
@@ -1220,9 +1355,18 @@ pub const EditorView = struct {
                 const glyph_y = @as(i32, @intCast(row_y)) + font.ascent - glyph.bearing_y;
                 renderer.drawGlyph(glyph, glyph_x, glyph_y, fg);
 
+                last_non_ws_col = col + char_cells;
                 col += char_cells;
                 offset += cp_len;
             }
+        }
+
+        // Highlight trailing whitespace (spaces/tabs at end of line) with a subtle reddish tint
+        if (last_non_ws_col < col) {
+            const trailing_ws_bg = Color.fromHex(0x45293a); // Subtle dark red tint
+            const ws_x = code_x + pad + last_non_ws_col * cell_w;
+            const ws_w = (col - last_non_ws_col) * cell_w;
+            renderer.fillRect(ws_x, row_y, ws_w, cell_h, trailing_ws_bg);
         }
     }
 

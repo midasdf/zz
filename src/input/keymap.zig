@@ -94,6 +94,9 @@ pub const Action = enum {
     rename_symbol,
     code_action,
     goto_references,
+    // Word deletion
+    delete_word_left,
+    delete_word_right,
 };
 
 pub fn modFromWindow(mods: Window.Modifiers) Modifier {
@@ -108,6 +111,9 @@ pub fn modFromWindow(mods: Window.Modifiers) Modifier {
 pub fn mapKey(keysym: u32, mods: Modifier) ?Action {
     // Ctrl+key bindings (normalize to lowercase for CapsLock compat)
     if (mods == .ctrl) {
+        // Ctrl+Backspace / Ctrl+Delete -> word deletion
+        if (keysym == Window.XK_BackSpace) return .delete_word_left;
+        if (keysym == Window.XK_Delete) return .delete_word_right;
         // Ctrl+Tab -> next tab
         if (keysym == Window.XK_Tab) return .next_tab;
         // Ctrl+\ -> split vertical
