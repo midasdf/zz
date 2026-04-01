@@ -441,20 +441,7 @@ pub const Window = struct {
     pub fn updateImeCursorPos(self: *Window, x: i32, y: i32) void {
         if (self.xim) |xim| {
             if (self.xim_connected and self.xic != 0) {
-                // Method 1: ext_move (simple but not all IMEs support it)
                 _ = c.xcb_xim_ext_move(xim, self.xic, @intCast(x), @intCast(y));
-
-                // Method 2: set_ic_values with SpotLocation (standard XIM way)
-                const spot = c.xcb_point_t{ .x = @intCast(x), .y = @intCast(y) };
-                _ = c.xcb_xim_set_ic_values(
-                    xim,
-                    self.xic,
-                    null, // no callback needed
-                    null,
-                    c.XCB_XIM_XNSpotLocation,
-                    &spot,
-                    @as(?*anyopaque, null),
-                );
             }
         }
     }

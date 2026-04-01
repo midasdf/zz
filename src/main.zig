@@ -1368,17 +1368,23 @@ fn renderFrame(
         }
     }
 
-    // Update IME cursor position to follow the editor cursor
+    // Update IME cursor position only when cursor has moved
     {
+        const S = struct { var last: u32 = std.math.maxInt(u32); };
         const active_ed = tab_mgr.activeView();
-        const lc = active_ed.buffer.offsetToLineCol(active_ed.cursor.primary().head);
-        if (lc.line >= active_ed.scroll_line) {
-            const screen_row = lc.line - active_ed.scroll_line;
-            const vcol = active_ed.visualColAtOffset(lc.line, lc.col);
-            const gw = active_ed.gutterWidth(font);
-            const px_x: i32 = @intCast(active_ed.x_offset + gw + active_ed.left_pad + vcol * font.cell_width);
-            const px_y: i32 = @intCast(active_ed.y_offset + (screen_row + 1) * font.cell_height);
-            win.updateImeCursorPos(px_x, px_y);
+        const cursor_pos = active_ed.cursor.primary().head;
+        const last_pos = &S.last;
+        if (cursor_pos != last_pos.*) {
+            last_pos.* = cursor_pos;
+            const lc = active_ed.buffer.offsetToLineCol(cursor_pos);
+            if (lc.line >= active_ed.scroll_line) {
+                const screen_row = lc.line - active_ed.scroll_line;
+                const vcol = active_ed.visualColAtOffset(lc.line, lc.col);
+                const gw = active_ed.gutterWidth(font);
+                const px_x: i32 = @intCast(active_ed.x_offset + gw + active_ed.left_pad + vcol * font.cell_width);
+                const px_y: i32 = @intCast(active_ed.y_offset + (screen_row + 1) * font.cell_height);
+                win.updateImeCursorPos(px_x, px_y);
+            }
         }
     }
 
