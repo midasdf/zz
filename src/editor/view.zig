@@ -1310,7 +1310,18 @@ pub const EditorView = struct {
         var sel_info_buf: [48]u8 = undefined;
         var sel_info_len: usize = 0;
         if (sel.hasSelection()) {
-            const sel_chars = sel.end() - sel.start();
+            // Count UTF-8 codepoints in selection
+            var sel_chars: u32 = 0;
+            {
+                var cp_off = sel.start();
+                while (cp_off < sel.end()) {
+                    const s = self.buffer.contiguousSliceAt(cp_off);
+                    if (s.len == 0) break;
+                    const byte_len = CursorState.utf8ByteLen(s[0]);
+                    sel_chars += 1;
+                    cp_off += byte_len;
+                }
+            }
             // Count newlines in selection
             var newlines: u32 = 0;
             var scan = sel.start();
