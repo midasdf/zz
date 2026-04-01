@@ -39,12 +39,27 @@ pub const DocumentSymbol = struct {
     line: u32,
 };
 
+pub const CodeAction = struct {
+    title: []u8, // owned
+    // Store workspace edit if present (array of FormattingEdit per file)
+    edits: std.ArrayList(FormattingEdit),
+    edit_uri: ?[]u8, // owned URI for the edits (null if no edit)
+};
+
+pub const RenameEdit = struct {
+    uri: []u8, // owned
+    edits: std.ArrayList(FormattingEdit),
+};
+
 pub const ServerCapabilities = struct {
     has_completion: bool = false,
     has_definition: bool = false,
     has_hover: bool = false,
     has_formatting: bool = false,
     has_document_symbols: bool = false,
+    has_rename: bool = false,
+    has_code_action: bool = false,
+    has_references: bool = false,
 };
 
 // ── LSP Client ──────────────────────────────────────────────────────
@@ -90,12 +105,27 @@ pub const LspClient = struct {
     document_symbols: std.ArrayList(DocumentSymbol),
     has_symbols: bool,
 
+    // Pending rename response
+    rename_edits: std.ArrayList(RenameEdit),
+    has_rename: bool,
+
+    // Pending code action response
+    code_actions: std.ArrayList(CodeAction),
+    has_code_actions: bool,
+
+    // Pending references response
+    references: std.ArrayList(Location),
+    has_references: bool,
+
     // Track pending request IDs
     pending_completion_id: ?u32,
     pending_definition_id: ?u32,
     pending_hover_id: ?u32,
     pending_formatting_id: ?u32,
     pending_symbols_id: ?u32,
+    pending_rename_id: ?u32,
+    pending_code_action_id: ?u32,
+    pending_references_id: ?u32,
 
     pub fn init(allocator: std.mem.Allocator) LspClient {
         return .{
@@ -115,6 +145,12 @@ pub const LspClient = struct {
             .has_formatting = false,
             .document_symbols = .{},
             .has_symbols = false,
+            .rename_edits = .{},
+            .has_rename = false,
+            .code_actions = .{},
+            .has_code_actions = false,
+            .references = .{},
+            .has_references = false,
             .read_buf = undefined,
             .read_pos = 0,
             .msg_buf = .{},
@@ -125,6 +161,9 @@ pub const LspClient = struct {
             .pending_hover_id = null,
             .pending_formatting_id = null,
             .pending_symbols_id = null,
+            .pending_rename_id = null,
+            .pending_code_action_id = null,
+            .pending_references_id = null,
         };
     }
 
@@ -197,6 +236,12 @@ pub const LspClient = struct {
         self.formatting_edits.deinit(self.allocator);
         self.freeDocumentSymbols();
         self.document_symbols.deinit(self.allocator);
+        self.freeRenameEdits();
+        self.rename_edits.deinit(self.allocator);
+        self.freeCodeActions();
+        self.code_actions.deinit(self.allocator);
+        self.freeReferences();
+        self.references.deinit(self.allocator);
         self.msg_buf.deinit(self.allocator);
     }
 
@@ -298,6 +343,33 @@ pub const LspClient = struct {
         , .{uri}) catch return;
         self.pending_symbols_id = self.next_id;
         self.sendRequest("textDocument/documentSymbol", params);
+    }
+
+    pub fn requestRename(self: *LspClient, uri: []const u8, line: u32, col: u32, new_name: []const u8) void {
+        var params_buf: [2048]u8 = undefined;
+        const params = std.fmt.bufPrint(&params_buf,
+            \\{{"textDocument":{{"uri":"{s}"}},"position":{{"line":{d},"character":{d}}},"newName":"{s}"}}
+        , .{ uri, line, col, new_name }) catch return;
+        self.pending_rename_id = self.next_id;
+        self.sendRequest("textDocument/rename", params);
+    }
+
+    pub fn requestCodeAction(self: *LspClient, uri: []const u8, line: u32, col: u32, end_line: u32, end_col: u32) void {
+        var params_buf: [2048]u8 = undefined;
+        const params = std.fmt.bufPrint(&params_buf,
+            \\{{"textDocument":{{"uri":"{s}"}},"range":{{"start":{{"line":{d},"character":{d}}},"end":{{"line":{d},"character":{d}}}}},"context":{{"diagnostics":[]}}}}
+        , .{ uri, line, col, end_line, end_col }) catch return;
+        self.pending_code_action_id = self.next_id;
+        self.sendRequest("textDocument/codeAction", params);
+    }
+
+    pub fn requestReferences(self: *LspClient, uri: []const u8, line: u32, col: u32) void {
+        var params_buf: [1024]u8 = undefined;
+        const params = std.fmt.bufPrint(&params_buf,
+            \\{{"textDocument":{{"uri":"{s}"}},"position":{{"line":{d},"character":{d}}},"context":{{"includeDeclaration":true}}}}
+        , .{ uri, line, col }) catch return;
+        self.pending_references_id = self.next_id;
+        self.sendRequest("textDocument/references", params);
     }
 
     // ── Message Processing ──────────────────────────────────────────
@@ -507,6 +579,30 @@ pub const LspClient = struct {
                 return;
             }
         }
+
+        if (self.pending_rename_id) |rid| {
+            if (id == rid) {
+                self.pending_rename_id = null;
+                self.handleRenameResponse(result);
+                return;
+            }
+        }
+
+        if (self.pending_code_action_id) |caid| {
+            if (id == caid) {
+                self.pending_code_action_id = null;
+                self.handleCodeActionResponse(result);
+                return;
+            }
+        }
+
+        if (self.pending_references_id) |refid| {
+            if (id == refid) {
+                self.pending_references_id = null;
+                self.handleReferencesResponse(result);
+                return;
+            }
+        }
     }
 
     fn parseServerCapabilities(self: *LspClient, result: std.json.Value) void {
@@ -544,6 +640,24 @@ pub const LspClient = struct {
         }
         if (caps.get("documentSymbolProvider")) |sp| {
             self.server_capabilities.has_document_symbols = switch (sp) {
+                .bool => |b| b,
+                else => true,
+            };
+        }
+        if (caps.get("renameProvider")) |rp| {
+            self.server_capabilities.has_rename = switch (rp) {
+                .bool => |b| b,
+                else => true,
+            };
+        }
+        if (caps.get("codeActionProvider")) |cap| {
+            self.server_capabilities.has_code_action = switch (cap) {
+                .bool => |b| b,
+                else => true,
+            };
+        }
+        if (caps.get("referencesProvider")) |refp| {
+            self.server_capabilities.has_references = switch (refp) {
                 .bool => |b| b,
                 else => true,
             };
@@ -996,6 +1110,196 @@ pub const LspClient = struct {
         }
     }
 
+    fn handleRenameResponse(self: *LspClient, result: std.json.Value) void {
+        self.freeRenameEdits();
+        self.has_rename = true;
+
+        // Result is a WorkspaceEdit: { "changes": { "uri": [TextEdit, ...], ... } }
+        // or { "documentChanges": [...] }
+        const obj = switch (result) {
+            .object => |o| o,
+            .null => return,
+            else => return,
+        };
+
+        // Handle "changes" format: { "file:///path": [TextEdit, ...] }
+        if (obj.get("changes")) |changes_val| {
+            const changes = switch (changes_val) {
+                .object => |o| o,
+                else => return,
+            };
+            var changes_it = changes.iterator();
+            while (changes_it.next()) |entry| {
+                const uri_str = entry.key_ptr.*;
+                const edits_val = entry.value_ptr.*;
+                const edits_arr = switch (edits_val) {
+                    .array => |a| a.items,
+                    else => continue,
+                };
+
+                const owned_uri = self.allocator.dupe(u8, uri_str) catch continue;
+                var edit_list: std.ArrayList(FormattingEdit) = .{};
+
+                for (edits_arr) |edit_val| {
+                    const edit = switch (edit_val) {
+                        .object => |o| o,
+                        else => continue,
+                    };
+                    if (parseTextEdit(self.allocator, edit)) |fe| {
+                        edit_list.append(self.allocator, fe) catch {
+                            self.allocator.free(fe.new_text);
+                            continue;
+                        };
+                    }
+                }
+
+                self.rename_edits.append(self.allocator, .{
+                    .uri = owned_uri,
+                    .edits = edit_list,
+                }) catch {
+                    self.allocator.free(owned_uri);
+                    for (edit_list.items) |e| self.allocator.free(e.new_text);
+                    edit_list.deinit(self.allocator);
+                    continue;
+                };
+            }
+        }
+    }
+
+    fn handleCodeActionResponse(self: *LspClient, result: std.json.Value) void {
+        self.freeCodeActions();
+        self.has_code_actions = true;
+
+        // Result is (Command | CodeAction)[] or null
+        const items = switch (result) {
+            .array => |a| a.items,
+            .null => return,
+            else => return,
+        };
+
+        for (items) |item_val| {
+            const item = switch (item_val) {
+                .object => |o| o,
+                else => continue,
+            };
+
+            const title_str = blk: {
+                const v = item.get("title") orelse continue;
+                break :blk switch (v) {
+                    .string => |s| s,
+                    else => continue,
+                };
+            };
+
+            const owned_title = self.allocator.dupe(u8, title_str) catch continue;
+            var edit_list: std.ArrayList(FormattingEdit) = .{};
+            var edit_uri: ?[]u8 = null;
+
+            // Parse workspace edit if present
+            if (item.get("edit")) |edit_val| {
+                const edit_obj = switch (edit_val) {
+                    .object => |o| o,
+                    else => null,
+                };
+                if (edit_obj) |eo| {
+                    if (eo.get("changes")) |changes_val| {
+                        const changes = switch (changes_val) {
+                            .object => |o| o,
+                            else => null,
+                        };
+                        if (changes) |ch| {
+                            var ch_it = ch.iterator();
+                            // Take first file's edits for simplicity
+                            if (ch_it.next()) |entry| {
+                                edit_uri = self.allocator.dupe(u8, entry.key_ptr.*) catch null;
+                                const edits_arr = switch (entry.value_ptr.*) {
+                                    .array => |a| a.items,
+                                    else => &[_]std.json.Value{},
+                                };
+                                for (edits_arr) |ev| {
+                                    const eo2 = switch (ev) {
+                                        .object => |o| o,
+                                        else => continue,
+                                    };
+                                    if (parseTextEdit(self.allocator, eo2)) |fe| {
+                                        edit_list.append(self.allocator, fe) catch {
+                                            self.allocator.free(fe.new_text);
+                                            continue;
+                                        };
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            self.code_actions.append(self.allocator, .{
+                .title = owned_title,
+                .edits = edit_list,
+                .edit_uri = edit_uri,
+            }) catch {
+                self.allocator.free(owned_title);
+                if (edit_uri) |eu| self.allocator.free(eu);
+                for (edit_list.items) |e| self.allocator.free(e.new_text);
+                edit_list.deinit(self.allocator);
+                continue;
+            };
+        }
+    }
+
+    fn handleReferencesResponse(self: *LspClient, result: std.json.Value) void {
+        self.freeReferences();
+        self.has_references = true;
+
+        // Result is Location[] or null
+        const items = switch (result) {
+            .array => |a| a.items,
+            .null => return,
+            else => return,
+        };
+
+        for (items) |item_val| {
+            const loc_obj = switch (item_val) {
+                .object => |o| o,
+                else => continue,
+            };
+
+            const uri_str = blk: {
+                const v = loc_obj.get("uri") orelse continue;
+                break :blk switch (v) {
+                    .string => |s| s,
+                    else => continue,
+                };
+            };
+
+            const range_val = loc_obj.get("range") orelse continue;
+            const range = switch (range_val) {
+                .object => |o| o,
+                else => continue,
+            };
+
+            const start_val = range.get("start") orelse continue;
+            const range_start = switch (start_val) {
+                .object => |o| o,
+                else => continue,
+            };
+
+            const line = jsonGetU32(range_start, "line") orelse continue;
+            const col = jsonGetU32(range_start, "character") orelse 0;
+
+            const owned_uri = self.allocator.dupe(u8, uri_str) catch continue;
+            self.references.append(self.allocator, .{
+                .uri = owned_uri,
+                .line = line,
+                .col = col,
+            }) catch {
+                self.allocator.free(owned_uri);
+                continue;
+            };
+        }
+    }
+
     // ── JSON-RPC Transport ──────────────────────────────────────────
 
     fn sendRequest(self: *LspClient, method: []const u8, params: []const u8) void {
@@ -1115,7 +1419,77 @@ pub const LspClient = struct {
         }
         self.document_symbols.clearRetainingCapacity();
     }
+
+    fn freeRenameEdits(self: *LspClient) void {
+        for (self.rename_edits.items) |*re| {
+            self.allocator.free(re.uri);
+            for (re.edits.items) |e| self.allocator.free(e.new_text);
+            re.edits.deinit(self.allocator);
+        }
+        self.rename_edits.clearRetainingCapacity();
+    }
+
+    fn freeCodeActions(self: *LspClient) void {
+        for (self.code_actions.items) |*ca| {
+            self.allocator.free(ca.title);
+            if (ca.edit_uri) |eu| self.allocator.free(eu);
+            for (ca.edits.items) |e| self.allocator.free(e.new_text);
+            ca.edits.deinit(self.allocator);
+        }
+        self.code_actions.clearRetainingCapacity();
+    }
+
+    fn freeReferences(self: *LspClient) void {
+        for (self.references.items) |ref| {
+            self.allocator.free(ref.uri);
+        }
+        self.references.clearRetainingCapacity();
+    }
 };
+
+// ── Helpers ────────────────────────────────────────────────────────
+
+fn parseTextEdit(allocator: std.mem.Allocator, edit: std.json.ObjectMap) ?FormattingEdit {
+    const new_text_str = blk: {
+        const v = edit.get("newText") orelse return null;
+        break :blk switch (v) {
+            .string => |s| s,
+            else => return null,
+        };
+    };
+
+    const range_val = edit.get("range") orelse return null;
+    const range = switch (range_val) {
+        .object => |o| o,
+        else => return null,
+    };
+
+    const start_val = range.get("start") orelse return null;
+    const range_start = switch (start_val) {
+        .object => |o| o,
+        else => return null,
+    };
+
+    const end_val = range.get("end") orelse return null;
+    const range_end = switch (end_val) {
+        .object => |o| o,
+        else => return null,
+    };
+
+    const start_line = jsonGetU32(range_start, "line") orelse return null;
+    const start_col = jsonGetU32(range_start, "character") orelse 0;
+    const end_line = jsonGetU32(range_end, "line") orelse return null;
+    const end_col = jsonGetU32(range_end, "character") orelse 0;
+
+    const owned_text = allocator.dupe(u8, new_text_str) catch return null;
+    return .{
+        .start_line = start_line,
+        .start_col = start_col,
+        .end_line = end_line,
+        .end_col = end_col,
+        .new_text = owned_text,
+    };
+}
 
 // ── Free Functions ──────────────────────────────────────────────────
 

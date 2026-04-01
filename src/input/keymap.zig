@@ -90,6 +90,10 @@ pub const Action = enum {
     select_line,
     // Word wrap
     toggle_word_wrap,
+    // LSP: rename, code actions, references
+    rename_symbol,
+    code_action,
+    goto_references,
 };
 
 pub fn modFromWindow(mods: Window.Modifiers) Modifier {
@@ -114,6 +118,8 @@ pub fn mapKey(keysym: u32, mods: Modifier) ?Action {
         if (keysym == ' ') return .trigger_completion;
         // Ctrl+/ -> toggle comment
         if (keysym == '/') return .toggle_comment;
+        // Ctrl+. -> code action
+        if (keysym == '.') return .code_action;
         const k = if (keysym >= 'A' and keysym <= 'Z') keysym + 32 else keysym;
         return switch (k) {
             'a' => .select_all,
@@ -164,7 +170,7 @@ pub fn mapKey(keysym: u32, mods: Modifier) ?Action {
         if (keysym == 'z' or keysym == 'Z') return .toggle_word_wrap;
     }
 
-    // Shift+arrow = selection
+    // Shift+arrow = selection, Shift+F12 = goto references
     if (mods == .shift) {
         return switch (keysym) {
             Window.XK_Left => .select_left,
@@ -173,6 +179,7 @@ pub fn mapKey(keysym: u32, mods: Modifier) ?Action {
             Window.XK_Down => .select_down,
             Window.XK_Home => .select_home,
             Window.XK_End => .select_end,
+            Window.XK_F12 => .goto_references,
             else => null,
         };
     }
@@ -192,6 +199,7 @@ pub fn mapKey(keysym: u32, mods: Modifier) ?Action {
         Window.XK_Return => .enter,
         Window.XK_Tab => .tab,
         Window.XK_Escape => .escape,
+        Window.XK_F2 => .rename_symbol,
         Window.XK_F11 => .hover,
         Window.XK_F12 => .goto_definition,
         else => null,

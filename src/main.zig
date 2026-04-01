@@ -28,6 +28,9 @@ const EditorMode = enum {
     project_search,
     find_replace,
     goto_symbol,
+    rename,
+    code_action,
+    goto_references,
 };
 
 const command_list = [_][]const u8{
@@ -296,6 +299,9 @@ pub fn main() !void {
                                             .goto_line => openGotoLine(&mode, &overlay),
                                             .find_in_project => openProjectSearch(&mode, &overlay, allocator, &file_list, &filtered_display, &search_results),
                                             .goto_symbol => openGotoSymbol(&mode, &overlay, editor, &lsp_client, &filtered_display, allocator),
+                                            .rename_symbol => openRename(&mode, &overlay, editor),
+                                            .code_action => openCodeAction(&mode, &overlay, editor, &lsp_client, &filtered_display, allocator),
+                                            .goto_references => openGotoReferences(&mode, &overlay, editor, &lsp_client, &filtered_display, allocator),
                                             .toggle_fold => {
                                                 editor.toggleFold();
                                             },
@@ -660,6 +666,37 @@ pub fn main() !void {
                             editor.markAllDirty();
                         }
                     }
+
+                    // Handle rename response
+                    if (lsp_client.has_rename) {
+                        lsp_client.has_rename = false;
+                        applyRenameEdits(editor, &lsp_client, &tab_mgr, &pane_mgr, allocator, &font, &git_info);
+                        notifyLspChange(editor, &lsp_client, allocator);
+                    }
+
+                    // Handle code action response
+                    if (lsp_client.has_code_actions) {
+                        lsp_client.has_code_actions = false;
+                        if (lsp_client.code_actions.items.len > 0 and mode == .code_action) {
+                            // Populate overlay with action titles
+                            filtered_display.clearRetainingCapacity();
+                            for (lsp_client.code_actions.items) |ca| {
+                                filtered_display.append(allocator, ca.title) catch {};
+                            }
+                            overlay.items = filtered_display.items;
+                            editor.markAllDirty();
+                        }
+                    }
+
+                    // Handle references response
+                    if (lsp_client.has_references) {
+                        lsp_client.has_references = false;
+                        if (lsp_client.references.items.len > 0 and mode == .goto_references) {
+                            populateReferencesDisplay(&lsp_client, &filtered_display, allocator);
+                            overlay.items = filtered_display.items;
+                            editor.markAllDirty();
+                        }
+                    }
                 },
 
                 3 => { // PTY output
@@ -946,6 +983,7 @@ fn handleAction(editor: *EditorView, win: *Window, action: keymap.Action, lsp_cl
         .split_vertical, .split_horizontal, .focus_next_pane, .close_pane => {},
         .toggle_sidebar, .toggle_terminal, .toggle_minimap, .toggle_word_wrap => {},
         .goto_symbol, .toggle_fold => {},
+        .rename_symbol, .code_action, .goto_references => {},
         .toggle_comment => {
             editor.toggleComment() catch {};
             notifyLspChange(editor, lsp_client, allocator);
@@ -1232,6 +1270,84 @@ fn openGotoSymbol(
     overlay.items = filtered_display.items;
 }
 
+fn openRename(mode: *EditorMode, overlay: *Overlay, editor: *EditorView) void {
+    mode.* = .rename;
+    overlay.open("Rename Symbol");
+    // Pre-fill with word under cursor
+    const pos = editor.cursor.primary().head;
+    // Find word boundaries
+    var start = pos;
+    while (start > 0) {
+        const slice = editor.buffer.contiguousSliceAt(start - 1);
+        if (slice.len == 0) break;
+        if (!isWordByte(slice[0])) break;
+        start -= 1;
+    }
+    var end = pos;
+    while (end < editor.buffer.total_len) {
+        const slice = editor.buffer.contiguousSliceAt(end);
+        if (slice.len == 0) break;
+        if (!isWordByte(slice[0])) break;
+        end += 1;
+    }
+    // Copy word into overlay input
+    const word_len = end - start;
+    if (word_len > 0 and word_len < overlay.input_buf.len) {
+        var i: u32 = 0;
+        var off = start;
+        while (off < end and i < overlay.input_buf.len) {
+            const slice = editor.buffer.contiguousSliceAt(off);
+            if (slice.len == 0) break;
+            overlay.input_buf[i] = slice[0];
+            i += 1;
+            off += 1;
+        }
+        overlay.input_len = i;
+    }
+}
+
+fn openCodeAction(
+    mode: *EditorMode,
+    overlay: *Overlay,
+    editor: *EditorView,
+    lsp_client: *lsp.LspClient,
+    filtered_display: *std.ArrayList([]const u8),
+    _: std.mem.Allocator,
+) void {
+    mode.* = .code_action;
+    overlay.open("Code Actions");
+    // Request code actions at cursor position
+    if (editor.file_path) |path| {
+        var uri_buf: [4096]u8 = undefined;
+        const uri = lsp.formatUri(path, &uri_buf);
+        const lc = editor.buffer.offsetToLineCol(editor.cursor.primary().head);
+        lsp_client.requestCodeAction(uri, lc.line, lc.col, lc.line, lc.col);
+    }
+    filtered_display.clearRetainingCapacity();
+    overlay.items = filtered_display.items;
+}
+
+fn openGotoReferences(
+    mode: *EditorMode,
+    overlay: *Overlay,
+    editor: *EditorView,
+    lsp_client: *lsp.LspClient,
+    filtered_display: *std.ArrayList([]const u8),
+    _: std.mem.Allocator,
+) void {
+    mode.* = .goto_references;
+    overlay.open("References");
+    // Request references at cursor position
+    if (editor.file_path) |path| {
+        var uri_buf: [4096]u8 = undefined;
+        const uri = lsp.formatUri(path, &uri_buf);
+        const lc = editor.buffer.offsetToLineCol(editor.cursor.primary().head);
+        lsp_client.requestReferences(uri, lc.line, lc.col);
+    }
+    filtered_display.clearRetainingCapacity();
+    overlay.items = filtered_display.items;
+}
+
 fn openProjectSearch(
     mode: *EditorMode,
     overlay: *Overlay,
@@ -1278,6 +1394,12 @@ fn handleOverlayKey(
     if (keysym == window_mod.XK_Escape) {
         if (mode.* == .goto_symbol) {
             freeSymbolDisplay(filtered_display, allocator);
+        }
+        if (mode.* == .goto_references) {
+            freeRefDisplay(filtered_display, allocator);
+        }
+        if (mode.* == .code_action) {
+            filtered_display.clearRetainingCapacity();
         }
         overlay.close();
         mode.* = .normal;
@@ -1368,6 +1490,61 @@ fn handleOverlayKey(
                 }
                 // Free allocated display strings before closing
                 freeSymbolDisplay(filtered_display, allocator);
+            },
+            .rename => {
+                // Send rename request with the new name from overlay input
+                const new_name = overlay.inputSlice();
+                if (new_name.len > 0) {
+                    if (editor.file_path) |path| {
+                        var uri_buf: [4096]u8 = undefined;
+                        const uri = lsp.formatUri(path, &uri_buf);
+                        const lc = editor.buffer.offsetToLineCol(editor.cursor.primary().head);
+                        lsp_client.requestRename(uri, lc.line, lc.col, new_name);
+                    }
+                }
+            },
+            .code_action => {
+                // Apply the selected code action
+                if (overlay.selectedItem()) |_| {
+                    const sel_idx = overlay.selected;
+                    if (sel_idx < lsp_client.code_actions.items.len) {
+                        const ca = lsp_client.code_actions.items[sel_idx];
+                        if (ca.edits.items.len > 0) {
+                            // Apply edits to the current file (same-file only)
+                            applyCodeActionEdits(editor, ca.edits.items);
+                            notifyLspChange(editor, lsp_client, allocator);
+                        }
+                    }
+                }
+                filtered_display.clearRetainingCapacity();
+            },
+            .goto_references => {
+                // Jump to selected reference
+                if (overlay.selectedItem()) |_| {
+                    const sel_idx = overlay.selected;
+                    if (sel_idx < lsp_client.references.items.len) {
+                        const ref = lsp_client.references.items[sel_idx];
+                        if (lsp.uriToPath(ref.uri)) |p| {
+                            const should_open = if (editor.file_path) |current|
+                                !std.mem.eql(u8, p, current)
+                            else
+                                true;
+                            if (should_open) {
+                                openFileInTab(tab_mgr, allocator, p, lsp_client, font, git_info);
+                                syncPaneToActiveTab(pane_mgr, tab_mgr);
+                            }
+                            const active = tab_mgr.activeView();
+                            const is_target = if (active.file_path) |fp| std.mem.eql(u8, fp, p) else false;
+                            if (is_target) {
+                                const target_off = active.buffer.lineToOffset(ref.line) + ref.col;
+                                active.cursor.moveTo(@min(target_off, active.buffer.total_len));
+                                active.ensureCursorVisible();
+                                active.markAllDirty();
+                            }
+                        }
+                    }
+                }
+                freeRefDisplay(filtered_display, allocator);
             },
             .normal => {},
         }
@@ -1777,6 +1954,106 @@ fn applyFormattingEdits(editor: *EditorView, lsp_client: *lsp.LspClient) void {
     editor.modified = true;
     editor.markAllDirty();
     editor.highlighter.parse(&editor.buffer);
+}
+
+// ── Apply rename edits from LSP ──────────────────────────────────
+
+fn applyRenameEdits(
+    editor: *EditorView,
+    lsp_client: *lsp.LspClient,
+    tab_mgr: *TabManager,
+    pane_mgr: *PaneManager,
+    allocator: std.mem.Allocator,
+    font: *FontFace,
+    git_info: ?*GitInfo,
+) void {
+    for (lsp_client.rename_edits.items) |re| {
+        const path = lsp.uriToPath(re.uri) orelse continue;
+
+        // Check if this is the current file
+        const is_current = if (editor.file_path) |fp| std.mem.eql(u8, fp, path) else false;
+
+        if (is_current) {
+            // Apply edits to current buffer (back-to-front)
+            applyCodeActionEdits(editor, re.edits.items);
+        } else {
+            // Open the file in a new tab and apply edits
+            openFileInTab(tab_mgr, allocator, path, lsp_client, font, git_info);
+            syncPaneToActiveTab(pane_mgr, tab_mgr);
+            const target = tab_mgr.activeView();
+            applyCodeActionEdits(target, re.edits.items);
+        }
+    }
+    editor.markAllDirty();
+}
+
+fn applyCodeActionEdits(editor: *EditorView, items: []const lsp.FormattingEdit) void {
+    if (items.len == 0) return;
+
+    // Sort indices descending by position (back-to-front)
+    const sorted = editor.allocator.alloc(usize, items.len) catch return;
+    defer editor.allocator.free(sorted);
+    for (sorted, 0..) |*s, i| s.* = i;
+
+    // Insertion sort descending by position
+    var sort_i: usize = 1;
+    while (sort_i < sorted.len) : (sort_i += 1) {
+        var j = sort_i;
+        while (j > 0) {
+            const a = items[sorted[j]];
+            const b = items[sorted[j - 1]];
+            if (a.start_line > b.start_line or (a.start_line == b.start_line and a.start_col > b.start_col)) {
+                const tmp = sorted[j];
+                sorted[j] = sorted[j - 1];
+                sorted[j - 1] = tmp;
+                j -= 1;
+            } else break;
+        }
+    }
+
+    const saved_pos = editor.cursor.primary().head;
+
+    for (sorted) |idx| {
+        const edit = items[idx];
+        const start_off = editor.buffer.lineToOffset(edit.start_line) + edit.start_col;
+        const end_off = editor.buffer.lineToOffset(edit.end_line) + edit.end_col;
+        const del_len = if (end_off > start_off) end_off - start_off else 0;
+
+        if (del_len > 0) {
+            editor.buffer.delete(start_off, del_len) catch continue;
+        }
+        if (edit.new_text.len > 0) {
+            editor.buffer.insert(start_off, edit.new_text) catch continue;
+        }
+    }
+
+    editor.cursor.moveTo(@min(saved_pos, editor.buffer.total_len));
+    editor.ensureCursorVisible();
+    editor.modified = true;
+    editor.markAllDirty();
+    editor.highlighter.parse(&editor.buffer);
+}
+
+fn populateReferencesDisplay(lsp_client: *lsp.LspClient, filtered_display: *std.ArrayList([]const u8), allocator: std.mem.Allocator) void {
+    filtered_display.clearRetainingCapacity();
+    for (lsp_client.references.items) |ref| {
+        const path = lsp.uriToPath(ref.uri) orelse ref.uri;
+        // Format as "path:line"
+        var buf: [512]u8 = undefined;
+        const display = std.fmt.bufPrint(&buf, "{s}:{d}", .{ path, ref.line + 1 }) catch continue;
+        const owned = allocator.dupe(u8, display) catch continue;
+        filtered_display.append(allocator, owned) catch {
+            allocator.free(owned);
+            continue;
+        };
+    }
+}
+
+fn freeRefDisplay(filtered_display: *std.ArrayList([]const u8), allocator: std.mem.Allocator) void {
+    for (filtered_display.items) |item| {
+        allocator.free(item);
+    }
+    filtered_display.clearRetainingCapacity();
 }
 
 // ── Completion popup rendering ──────────────────────────────────
