@@ -25,6 +25,8 @@ const EditorMode = enum {
     file_finder,
     search,
     goto_line,
+    project_search,
+    find_replace,
 };
 
 const command_list = [_][]const u8{
@@ -133,16 +135,28 @@ pub fn main() !void {
     // Overlay state
     var mode: EditorMode = .normal;
     var overlay = Overlay{};
+    var replace_buf: [256]u8 = undefined;
+    var replace_len: u32 = 0;
+    var replace_field_active: bool = false; // false=search field, true=replace field
     var file_list: ?[][]const u8 = null;
     defer if (file_list) |fl| file_walker.freeFiles(allocator, fl);
     var filtered_display: std.ArrayList([]const u8) = .{};
     defer filtered_display.deinit(allocator);
+    var search_results: std.ArrayList([]u8) = .{};
+    defer {
+        for (search_results.items) |r| allocator.free(r);
+        search_results.deinit(allocator);
+    }
 
     // Completion popup state
     var completion_active = false;
     var completion_selected: usize = 0;
-    _ = &completion_active;
-    _ = &completion_selected;
+
+    // Hover tooltip state
+    var hover_active = false;
+
+    // Format-on-save: when true, auto-save after formatting edits arrive
+    var format_then_save = false;
 
     // Epoll setup
     const epoll_fd = try std.posix.epoll_create1(std.os.linux.EPOLL.CLOEXEC);
@@ -186,7 +200,7 @@ pub fn main() !void {
         const editor = tab_mgr.activeView();
         editor.lsp_diagnostics = lsp_client.diagnostics.items;
         file_tree.active_path = if (editor.file_path) |p| p else null;
-        renderFrame(&tab_mgr, &pane_mgr, &win, &font, &overlay, &file_tree, &terminal);
+        renderFrame(&tab_mgr, &pane_mgr, &win, &font, &overlay, &file_tree, &terminal, &lsp_client, completion_active, completion_selected, hover_active);
     }
 
     while (running) {
@@ -202,8 +216,45 @@ pub fn main() !void {
                             .close => running = false,
 
                             .key_press => |ke| {
+                                if (hover_active) {
+                                    // Any key dismisses hover tooltip
+                                    hover_active = false;
+                                    editor.markAllDirty();
+                                    // Fall through to process the key normally below
+                                }
+                                if (completion_active) {
+                                    if (ke.keysym == window_mod.XK_Escape) {
+                                        completion_active = false;
+                                        editor.markAllDirty();
+                                        continue;
+                                    } else if (ke.keysym == window_mod.XK_Up) {
+                                        if (completion_selected > 0) completion_selected -= 1;
+                                        editor.markAllDirty();
+                                        continue;
+                                    } else if (ke.keysym == window_mod.XK_Down) {
+                                        if (completion_selected + 1 < lsp_client.completion_items.items.len) completion_selected += 1;
+                                        editor.markAllDirty();
+                                        continue;
+                                    } else if (ke.keysym == window_mod.XK_Return or ke.keysym == window_mod.XK_Tab) {
+                                        // Accept selected completion
+                                        if (completion_selected < lsp_client.completion_items.items.len) {
+                                            const item = lsp_client.completion_items.items[completion_selected];
+                                            // Delete the partial word being typed, then insert completion
+                                            deleteWordBeforeCursor(editor);
+                                            editor.insertAtCursor(item.label) catch {};
+                                            notifyLspChange(editor, &lsp_client, allocator);
+                                        }
+                                        completion_active = false;
+                                        editor.markAllDirty();
+                                        continue;
+                                    } else {
+                                        // Any other key: close popup and process normally
+                                        completion_active = false;
+                                        editor.markAllDirty();
+                                    }
+                                }
                                 if (mode != .normal) {
-                                    handleOverlayKey(&mode, &overlay, &tab_mgr, &pane_mgr, ke, allocator, &file_list, &filtered_display, &lsp_client, &font, &git_info);
+                                    handleOverlayKey(&mode, &overlay, &tab_mgr, &pane_mgr, ke, allocator, &file_list, &filtered_display, &search_results, &lsp_client, &font, &git_info, &replace_buf, &replace_len, &replace_field_active);
                                 } else {
                                     const mod = keymap.modFromWindow(ke.modifiers);
                                     // Check for toggle_terminal first (Ctrl+`)
@@ -239,7 +290,9 @@ pub fn main() !void {
                                             .command_palette => openCommandPalette(&mode, &overlay, &filtered_display, allocator),
                                             .finder_files => openFileFinder(&mode, &overlay, allocator, &file_list, &filtered_display),
                                             .find => openSearch(&mode, &overlay),
+                                            .find_replace => openFindReplace(&mode, &overlay, &replace_buf, &replace_len, &replace_field_active),
                                             .goto_line => openGotoLine(&mode, &overlay),
+                                            .find_in_project => openProjectSearch(&mode, &overlay, allocator, &file_list, &filtered_display, &search_results),
                                             .next_tab => {
                                                 tab_mgr.nextTab();
                                                 syncPaneToActiveTab(&pane_mgr, &tab_mgr);
@@ -284,6 +337,34 @@ pub fn main() !void {
                                                 relayoutWithTerminal(&pane_mgr, &file_tree, &terminal, tab_bar_h, win.width, win.height, &font);
                                                 markAllPanesDirty(&pane_mgr);
                                             },
+                                            .trigger_completion => {
+                                                if (editor.file_path) |path| {
+                                                    var tc_buf: [4096]u8 = undefined;
+                                                    const tc_uri = lsp.formatUri(path, &tc_buf);
+                                                    const tc_lc = editor.buffer.offsetToLineCol(editor.cursor.primary().head);
+                                                    lsp_client.requestCompletion(tc_uri, tc_lc.line, tc_lc.col);
+                                                }
+                                            },
+                                            .format_document => {
+                                                if (editor.file_path) |path| {
+                                                    var fd_buf: [4096]u8 = undefined;
+                                                    const fd_uri = lsp.formatUri(path, &fd_buf);
+                                                    lsp_client.requestFormatting(fd_uri);
+                                                }
+                                            },
+                                            .save => {
+                                                // Format-on-save: request formatting first if LSP supports it
+                                                if (lsp_client.server_capabilities.has_formatting) {
+                                                    if (editor.file_path) |path| {
+                                                        var sv_buf: [4096]u8 = undefined;
+                                                        const sv_uri = lsp.formatUri(path, &sv_buf);
+                                                        lsp_client.requestFormatting(sv_uri);
+                                                        format_then_save = true;
+                                                    }
+                                                } else {
+                                                    handleAction(editor, &win, action, &lsp_client, allocator);
+                                                }
+                                            },
                                             .toggle_terminal => unreachable,
                                             else => handleAction(editor, &win, action, &lsp_client, allocator),
                                         }
@@ -298,15 +379,38 @@ pub fn main() !void {
 
                             .text_input => |te| {
                                 if (mode != .normal) {
-                                    overlay.appendText(te.slice());
-                                    updateOverlayResults(&mode, &overlay, allocator, file_list, &filtered_display);
+                                    if (mode == .find_replace and replace_field_active) {
+                                        // Append to replace buffer
+                                        for (te.slice()) |ch| {
+                                            if (ch >= 0x20 and replace_len < replace_buf.len) {
+                                                replace_buf[replace_len] = ch;
+                                                replace_len += 1;
+                                            }
+                                        }
+                                    } else {
+                                        overlay.appendText(te.slice());
+                                        updateOverlayResults(&mode, &overlay, allocator, file_list, &filtered_display, &search_results);
+                                    }
                                     editor.markAllDirty();
                                 } else if (terminal.focused) {
                                     terminal.handleTextInput(te.slice());
                                 } else {
+                                    if (completion_active) {
+                                        completion_active = false;
+                                    }
                                     editor.insertAtCursor(te.slice()) catch {};
                                     notifyLspChange(editor, &lsp_client, allocator);
                                     resetCursorBlink(editor);
+                                    // Auto-trigger completion after . : ( @
+                                    const typed = te.slice();
+                                    if (typed.len == 1 and (typed[0] == '.' or typed[0] == ':' or typed[0] == '(' or typed[0] == '@')) {
+                                        if (editor.file_path) |path| {
+                                            var uri_buf2: [4096]u8 = undefined;
+                                            const uri2 = lsp.formatUri(path, &uri_buf2);
+                                            const lc2 = editor.buffer.offsetToLineCol(editor.cursor.primary().head);
+                                            lsp_client.requestCompletion(uri2, lc2.line, lc2.col);
+                                        }
+                                    }
                                 }
                             },
 
@@ -456,6 +560,42 @@ pub fn main() !void {
                     editor.lsp_diagnostics = lsp_client.diagnostics.items;
                     editor.markAllDirty();
 
+                    // Handle completion response
+                    if (lsp_client.has_completion) {
+                        lsp_client.has_completion = false;
+                        if (lsp_client.completion_items.items.len > 0) {
+                            completion_active = true;
+                            completion_selected = 0;
+                        }
+                    }
+
+                    // Handle hover response
+                    if (lsp_client.has_hover) {
+                        lsp_client.has_hover = false;
+                        if (lsp_client.hover_text != null) {
+                            hover_active = true;
+                        }
+                    }
+
+                    // Handle formatting response
+                    if (lsp_client.has_formatting) {
+                        lsp_client.has_formatting = false;
+                        if (lsp_client.formatting_edits.items.len > 0) {
+                            applyFormattingEdits(editor, &lsp_client);
+                            notifyLspChange(editor, &lsp_client, allocator);
+                        }
+                        // Format-on-save: auto-save after formatting completes
+                        if (format_then_save) {
+                            format_then_save = false;
+                            saveFile(editor);
+                            if (editor.file_path) |path| {
+                                var sv_uri_buf: [4096]u8 = undefined;
+                                const sv_uri = lsp.formatUri(path, &sv_uri_buf);
+                                lsp_client.didSave(sv_uri);
+                            }
+                        }
+                    }
+
                     // Handle goto definition response
                     if (lsp_client.has_goto) {
                         lsp_client.has_goto = false;
@@ -494,7 +634,7 @@ pub fn main() !void {
         {
             const editor = pane_mgr.active_leaf;
             editor.lsp_diagnostics = lsp_client.diagnostics.items;
-            renderFrame(&tab_mgr, &pane_mgr, &win, &font, &overlay, &file_tree, &terminal);
+            renderFrame(&tab_mgr, &pane_mgr, &win, &font, &overlay, &file_tree, &terminal, &lsp_client, completion_active, completion_selected, hover_active);
         }
     }
 }
@@ -673,7 +813,7 @@ fn handleAction(editor: *EditorView, win: *Window, action: keymap.Action, lsp_cl
             editor.markAllDirty();
         },
         .enter => {
-            editor.insertAtCursor("\n") catch {};
+            editor.insertNewline() catch {};
             notifyLspChange(editor, lsp_client, allocator);
         },
         .tab => {
@@ -741,8 +881,25 @@ fn handleAction(editor: *EditorView, win: *Window, action: keymap.Action, lsp_cl
                 editor.markAllDirty();
             }
         },
+        .duplicate_line => {
+            editor.duplicateLine() catch {};
+            notifyLspChange(editor, lsp_client, allocator);
+        },
+        .move_line_up => {
+            editor.moveLineUp() catch {};
+            notifyLspChange(editor, lsp_client, allocator);
+        },
+        .move_line_down => {
+            editor.moveLineDown() catch {};
+            notifyLspChange(editor, lsp_client, allocator);
+        },
+        .delete_line => {
+            editor.deleteLine() catch {};
+            notifyLspChange(editor, lsp_client, allocator);
+        },
         // These are handled before reaching handleAction
-        .command_palette, .finder_files, .find, .goto_line => {},
+        .command_palette, .finder_files, .find, .goto_line, .find_in_project, .find_replace => {},
+        .trigger_completion, .format_document => {},
         .next_tab, .prev_tab, .close_tab => {},
         .split_vertical, .split_horizontal, .focus_next_pane, .close_pane => {},
         .toggle_sidebar, .toggle_terminal => {},
@@ -843,7 +1000,19 @@ fn recomputeGitDiff(git_info: *GitInfo, view: *EditorView) void {
     }
 }
 
-fn renderFrame(tab_mgr: *TabManager, pane_mgr: *PaneManager, win: *Window, font: *FontFace, overlay: *Overlay, file_tree: *FileTree, term: *Terminal) void {
+fn renderFrame(
+    tab_mgr: *TabManager,
+    pane_mgr: *PaneManager,
+    win: *Window,
+    font: *FontFace,
+    overlay: *Overlay,
+    file_tree: *FileTree,
+    term: *Terminal,
+    lsp_client: *lsp.LspClient,
+    comp_active: bool,
+    comp_selected: usize,
+    show_hover: bool,
+) void {
     var renderer = Renderer{
         .buffer = win.getBuffer(),
         .stride = win.stride,
@@ -892,6 +1061,20 @@ fn renderFrame(tab_mgr: *TabManager, pane_mgr: *PaneManager, win: *Window, font:
     term.render(&renderer, font);
 
     overlay.render(&renderer, font);
+
+    // Completion popup
+    if (comp_active and lsp_client.completion_items.items.len > 0) {
+        const active_ed = pane_mgr.active_leaf;
+        renderCompletionPopup(&renderer, font, lsp_client.completion_items.items, comp_selected, active_ed);
+    }
+
+    // Hover tooltip
+    if (show_hover) {
+        if (lsp_client.hover_text) |hover_text| {
+            const active_ed = pane_mgr.active_leaf;
+            renderHoverTooltip(&renderer, font, hover_text, active_ed);
+        }
+    }
 
     // Update IME cursor position to follow the editor cursor
     {
@@ -961,9 +1144,41 @@ fn openSearch(mode: *EditorMode, overlay: *Overlay) void {
     overlay.open("Search");
 }
 
+fn openFindReplace(mode: *EditorMode, overlay: *Overlay, replace_buf: *[256]u8, replace_len: *u32, replace_field_active: *bool) void {
+    mode.* = .find_replace;
+    replace_len.* = 0;
+    replace_field_active.* = false;
+    overlay.open("Find & Replace");
+    overlay.secondary_buf = replace_buf;
+    overlay.secondary_len = replace_len;
+    overlay.secondary_label = "Replace with:";
+    overlay.secondary_active = false;
+}
+
 fn openGotoLine(mode: *EditorMode, overlay: *Overlay) void {
     mode.* = .goto_line;
     overlay.open("Go to Line");
+}
+
+fn openProjectSearch(
+    mode: *EditorMode,
+    overlay: *Overlay,
+    allocator: std.mem.Allocator,
+    file_list: *?[][]const u8,
+    filtered_display: *std.ArrayList([]const u8),
+    search_results: *std.ArrayList([]u8),
+) void {
+    // Walk files if not cached
+    if (file_list.* == null) {
+        file_list.* = file_walker.walkFiles(allocator, ".", 5000) catch null;
+    }
+    mode.* = .project_search;
+    overlay.open("Search in Project");
+    // Clear previous results
+    for (search_results.items) |r| allocator.free(r);
+    search_results.clearRetainingCapacity();
+    filtered_display.clearRetainingCapacity();
+    overlay.items = &.{};
 }
 
 // ── Overlay keyboard handler ──────────────────────────────────────
@@ -977,9 +1192,13 @@ fn handleOverlayKey(
     allocator: std.mem.Allocator,
     file_list: *?[][]const u8,
     filtered_display: *std.ArrayList([]const u8),
+    search_results: *std.ArrayList([]u8),
     lsp_client: *lsp.LspClient,
     font: *const FontFace,
     git_info: ?*GitInfo,
+    replace_buf: *[256]u8,
+    replace_len: *u32,
+    replace_field_active: *bool,
 ) void {
     const keysym = ke.keysym;
     const editor = pane_mgr.active_leaf;
@@ -987,6 +1206,15 @@ fn handleOverlayKey(
     if (keysym == window_mod.XK_Escape) {
         overlay.close();
         mode.* = .normal;
+        replace_field_active.* = false;
+        editor.markAllDirty();
+        return;
+    }
+
+    // Tab switches between search/replace fields in find_replace mode
+    if (mode.* == .find_replace and keysym == window_mod.XK_Tab) {
+        replace_field_active.* = !replace_field_active.*;
+        overlay.secondary_active = replace_field_active.*;
         editor.markAllDirty();
         return;
     }
@@ -1017,10 +1245,39 @@ fn handleOverlayKey(
                     executeCommand(cmd_name, editor);
                 }
             },
+            .project_search => {
+                if (overlay.selectedItem()) |result| {
+                    // Parse "path:line: content" format
+                    if (parseSearchResult(result)) |parsed| {
+                        openFileInTab(tab_mgr, allocator, parsed.path, lsp_client, font, git_info);
+                        syncPaneToActiveTab(pane_mgr, tab_mgr);
+                        const view = tab_mgr.activeView();
+                        if (parsed.line > 0) {
+                            const offset = view.buffer.lineToOffset(parsed.line - 1);
+                            view.cursor.moveTo(offset);
+                            view.ensureCursorVisible();
+                        }
+                        view.markAllDirty();
+                    }
+                }
+            },
+            .find_replace => {
+                // Enter = replace current match + find next
+                const query = overlay.inputSlice();
+                const replacement = replace_buf[0..replace_len.*];
+                if (query.len > 0) {
+                    replaceCurrentAndFindNext(editor, query, replacement, allocator);
+                    notifyLspChange(editor, lsp_client, allocator);
+                }
+                // Don't close overlay -- allow multiple replacements
+                editor.markAllDirty();
+                return;
+            },
             .normal => {},
         }
         overlay.close();
         mode.* = .normal;
+        replace_field_active.* = false;
         pane_mgr.active_leaf.markAllDirty();
         return;
     }
@@ -1036,8 +1293,12 @@ fn handleOverlayKey(
         return;
     }
     if (keysym == window_mod.XK_BackSpace) {
-        overlay.backspace();
-        updateOverlayResults(mode, overlay, allocator, file_list.*, filtered_display);
+        if (mode.* == .find_replace and replace_field_active.*) {
+            if (replace_len.* > 0) replace_len.* -= 1;
+        } else {
+            overlay.backspace();
+            updateOverlayResults(mode, overlay, allocator, file_list.*, filtered_display, search_results);
+        }
         editor.markAllDirty();
         return;
     }
@@ -1051,6 +1312,7 @@ fn updateOverlayResults(
     allocator: std.mem.Allocator,
     file_list: ?[][]const u8,
     filtered_display: *std.ArrayList([]const u8),
+    search_results: *std.ArrayList([]u8),
 ) void {
     const query = overlay.inputSlice();
     filtered_display.clearRetainingCapacity();
@@ -1078,6 +1340,20 @@ fn updateOverlayResults(
                 filtered_display.append(allocator, command_list[m.index]) catch {};
             }
         },
+        .project_search => {
+            // Free previous search results
+            for (search_results.items) |r| allocator.free(r);
+            search_results.clearRetainingCapacity();
+
+            if (query.len >= 2) {
+                if (file_list) |files| {
+                    searchInFiles(allocator, query, files, 100, search_results);
+                    for (search_results.items) |r| {
+                        filtered_display.append(allocator, r) catch {};
+                    }
+                }
+            }
+        },
         else => {},
     }
 
@@ -1087,6 +1363,77 @@ fn updateOverlayResults(
 }
 
 // ── Find next occurrence in buffer ────────────────────────────────
+
+// ── Project-wide search ─────────────────────────────────────────
+
+fn searchInFiles(
+    allocator: std.mem.Allocator,
+    query: []const u8,
+    files: []const []const u8,
+    max_results: usize,
+    results: *std.ArrayList([]u8),
+) void {
+    for (files) |file_path| {
+        if (results.items.len >= max_results) break;
+        const content = std.fs.cwd().readFileAlloc(allocator, file_path, 1024 * 1024) catch continue;
+        defer allocator.free(content);
+
+        var line_num: u32 = 1;
+        var lines = std.mem.splitScalar(u8, content, '\n');
+        while (lines.next()) |line| {
+            if (results.items.len >= max_results) break;
+            if (containsIgnoreCase(line, query)) {
+                const trimmed = std.mem.trim(u8, line, " \t\r");
+                const preview_len = @min(trimmed.len, 60);
+                const result = std.fmt.allocPrint(allocator, "{s}:{d}: {s}", .{ file_path, line_num, trimmed[0..preview_len] }) catch continue;
+                results.append(allocator, result) catch {
+                    allocator.free(result);
+                    continue;
+                };
+            }
+            line_num += 1;
+        }
+    }
+}
+
+fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    if (haystack.len < needle.len) return false;
+    const end = haystack.len - needle.len + 1;
+    var i: usize = 0;
+    while (i < end) : (i += 1) {
+        var match = true;
+        for (needle, 0..) |nc, j| {
+            const hc = haystack[i + j];
+            const hn = if (hc >= 'A' and hc <= 'Z') hc + 32 else hc;
+            const nn = if (nc >= 'A' and nc <= 'Z') nc + 32 else nc;
+            if (hn != nn) {
+                match = false;
+                break;
+            }
+        }
+        if (match) return true;
+    }
+    return false;
+}
+
+const ParsedSearchResult = struct {
+    path: []const u8,
+    line: u32,
+};
+
+fn parseSearchResult(result: []const u8) ?ParsedSearchResult {
+    // Format: "path:line: content"
+    // Find first colon (end of path)
+    const colon1 = std.mem.indexOfScalar(u8, result, ':') orelse return null;
+    if (colon1 + 1 >= result.len) return null;
+    // Find second colon (end of line number)
+    const rest = result[colon1 + 1 ..];
+    const colon2 = std.mem.indexOfScalar(u8, rest, ':') orelse return null;
+    const line_str = rest[0..colon2];
+    const line_num = std.fmt.parseInt(u32, line_str, 10) catch return null;
+    return .{ .path = result[0..colon1], .line = line_num };
+}
 
 fn findNext(editor: *EditorView, query: []const u8) void {
     if (query.len == 0) return;
@@ -1113,6 +1460,29 @@ fn findNext(editor: *EditorView, query: []const u8) void {
         editor.cursor.cursors.items[0] = .{ .anchor = abs_pos, .head = end_pos };
         editor.ensureCursorVisible();
     }
+}
+
+fn replaceCurrentAndFindNext(editor: *EditorView, query: []const u8, replacement: []const u8, allocator: std.mem.Allocator) void {
+    if (query.len == 0) return;
+
+    const sel = editor.cursor.primary();
+    // Check if current selection matches the search query
+    if (sel.hasSelection()) {
+        const selected = editor.getSelectedText() orelse {
+            findNext(editor, query);
+            return;
+        };
+        defer allocator.free(selected);
+
+        if (std.mem.eql(u8, selected, query)) {
+            // Replace the current selection
+            editor.deleteSelection() catch return;
+            editor.insertAtCursor(replacement) catch return;
+        }
+    }
+
+    // Find next occurrence
+    findNext(editor, query);
 }
 
 // ── Open a file in a tab (reuse existing or create new) ──────────
@@ -1208,4 +1578,220 @@ fn executeCommand(cmd_name: []const u8, editor: *EditorView) void {
     // Other commands (Copy, Cut, Paste, Open, Find, Go to Line) require
     // additional context (window for clipboard, overlay for sub-modes).
     // They are no-ops from the palette for now.
+}
+
+
+// ── Delete word before cursor (for completion insertion) ────────
+
+fn deleteWordBeforeCursor(editor: *EditorView) void {
+    const pos = editor.cursor.primary().head;
+    if (pos == 0) return;
+
+    var start = pos;
+    while (start > 0) {
+        const slice = editor.buffer.contiguousSliceAt(start - 1);
+        if (slice.len == 0) break;
+        if (!isWordByte(slice[0])) break;
+        start -= 1;
+    }
+
+    if (start == pos) return;
+
+    const del_len = pos - start;
+    editor.buffer.delete(start, del_len) catch return;
+    editor.cursor.moveTo(start);
+    editor.markAllDirty();
+}
+
+fn isWordByte(b: u8) bool {
+    return (b >= 'a' and b <= 'z') or
+        (b >= 'A' and b <= 'Z') or
+        (b >= '0' and b <= '9') or
+        b == '_';
+}
+
+// ── Apply LSP formatting edits ──────────────────────────────────
+
+fn applyFormattingEdits(editor: *EditorView, lsp_client: *lsp.LspClient) void {
+    const items = lsp_client.formatting_edits.items;
+    if (items.len == 0) return;
+
+    var sorted: [256]usize = undefined;
+    const count = @min(items.len, 256);
+    for (0..count) |sort_i| {
+        sorted[sort_i] = sort_i;
+    }
+    // Insertion sort descending by position
+    var sort_i: usize = 1;
+    while (sort_i < count) : (sort_i += 1) {
+        var j = sort_i;
+        while (j > 0) {
+            const a = items[sorted[j]];
+            const b = items[sorted[j - 1]];
+            if (a.start_line > b.start_line or (a.start_line == b.start_line and a.start_col > b.start_col)) {
+                const tmp = sorted[j];
+                sorted[j] = sorted[j - 1];
+                sorted[j - 1] = tmp;
+                j -= 1;
+            } else break;
+        }
+    }
+
+    const saved_pos = editor.cursor.primary().head;
+    const saved_lc = editor.buffer.offsetToLineCol(saved_pos);
+
+    for (sorted[0..count]) |idx| {
+        const edit = items[idx];
+        const start_off = editor.buffer.lineToOffset(edit.start_line) + edit.start_col;
+        const end_off = editor.buffer.lineToOffset(edit.end_line) + edit.end_col;
+        const del_len = if (end_off > start_off) end_off - start_off else 0;
+
+        if (del_len > 0) {
+            editor.buffer.delete(start_off, del_len) catch continue;
+        }
+        if (edit.new_text.len > 0) {
+            editor.buffer.insert(start_off, edit.new_text) catch continue;
+        }
+    }
+
+    const restored_off = editor.buffer.lineToOffset(saved_lc.line) + saved_lc.col;
+    editor.cursor.moveTo(@min(restored_off, editor.buffer.total_len));
+    editor.ensureCursorVisible();
+    editor.modified = true;
+    editor.markAllDirty();
+    editor.highlighter.parse(&editor.buffer);
+}
+
+// ── Completion popup rendering ──────────────────────────────────
+
+fn renderCompletionPopup(
+    renderer: *Renderer,
+    font: *FontFace,
+    items: []const lsp.CompletionItem,
+    selected: usize,
+    editor: *const EditorView,
+) void {
+    const cell_w = font.cell_width;
+    const cell_h = font.cell_height;
+    if (cell_w == 0 or cell_h == 0 or items.len == 0) return;
+
+    const lc = editor.buffer.offsetToLineCol(editor.cursor.primary().head);
+    if (lc.line < editor.scroll_line) return;
+    const screen_row = lc.line - editor.scroll_line;
+    const vcol = editor.visualColAtOffset(lc.line, lc.col);
+    const gw = editor.gutterWidth(font);
+    const popup_x = editor.x_offset + gw + editor.left_pad + vcol * cell_w;
+    const popup_y = editor.y_offset + (screen_row + 1) * cell_h;
+
+    const max_items: u32 = @min(@as(u32, @intCast(items.len)), 10);
+    const popup_w: u32 = 35 * cell_w;
+    const popup_h: u32 = max_items * cell_h;
+
+    const bg = render_mod.Color.fromHex(0x1e1e2e);
+    const sel_bg = render_mod.Color.fromHex(0x45475a);
+    const border = render_mod.Color.fromHex(0x585b70);
+    const text_color = render_mod.Color.fromHex(0xcdd6f4);
+    const detail_color = render_mod.Color.fromHex(0x6c7086);
+
+    renderer.fillRect(popup_x -| 1, popup_y -| 1, popup_w + 2, popup_h + 2, border);
+    renderer.fillRect(popup_x, popup_y, popup_w, popup_h, bg);
+
+    var row: u32 = 0;
+    for (items[0..max_items], 0..) |item, i| {
+        const ry = popup_y + row * cell_h;
+        const rbg = if (i == selected) sel_bg else bg;
+        renderer.fillRect(popup_x, ry, popup_w, cell_h, rbg);
+
+        var tx = popup_x + 4;
+        for (item.label) |ch| {
+            if (tx + cell_w > popup_x + popup_w) break;
+            const glyph = font.getGlyph(ch) catch continue;
+            const gx = @as(i32, @intCast(tx)) + glyph.bearing_x;
+            const gy = @as(i32, @intCast(ry)) + font.ascent - glyph.bearing_y;
+            renderer.drawGlyph(glyph, gx, gy, text_color);
+            tx += cell_w;
+        }
+
+        if (item.detail) |detail| {
+            tx += cell_w;
+            for (detail) |ch| {
+                if (tx + cell_w > popup_x + popup_w) break;
+                const glyph = font.getGlyph(ch) catch continue;
+                const gx = @as(i32, @intCast(tx)) + glyph.bearing_x;
+                const gy = @as(i32, @intCast(ry)) + font.ascent - glyph.bearing_y;
+                renderer.drawGlyph(glyph, gx, gy, detail_color);
+                tx += cell_w;
+            }
+        }
+
+        row += 1;
+    }
+}
+
+// ── Hover tooltip rendering ─────────────────────────────────────
+
+fn renderHoverTooltip(
+    renderer: *Renderer,
+    font: *FontFace,
+    text: []const u8,
+    editor: *const EditorView,
+) void {
+    const cell_w = font.cell_width;
+    const cell_h = font.cell_height;
+    if (cell_w == 0 or cell_h == 0 or text.len == 0) return;
+
+    const lc = editor.buffer.offsetToLineCol(editor.cursor.primary().head);
+    if (lc.line < editor.scroll_line) return;
+    const screen_row = lc.line - editor.scroll_line;
+    const vcol = editor.visualColAtOffset(lc.line, lc.col);
+    const gw = editor.gutterWidth(font);
+    const tip_x = editor.x_offset + gw + editor.left_pad + vcol * cell_w;
+
+    var line_count: u32 = 1;
+    var max_line_len: u32 = 0;
+    var cur_len: u32 = 0;
+    for (text) |ch| {
+        if (ch == '\n') {
+            line_count += 1;
+            if (cur_len > max_line_len) max_line_len = cur_len;
+            cur_len = 0;
+        } else {
+            cur_len += 1;
+        }
+    }
+    if (cur_len > max_line_len) max_line_len = cur_len;
+
+    const tip_w = @min((max_line_len + 2) * cell_w, renderer.width * 7 / 10);
+    const visible_lines = @min(line_count, 8);
+    const tip_h = visible_lines * cell_h + 4;
+    const tip_y = if (screen_row > 0 and editor.y_offset + (screen_row) * cell_h > tip_h)
+        editor.y_offset + screen_row * cell_h - tip_h
+    else
+        editor.y_offset + (screen_row + 1) * cell_h;
+
+    const bg = render_mod.Color.fromHex(0x1e1e2e);
+    const border = render_mod.Color.fromHex(0x585b70);
+    const text_color = render_mod.Color.fromHex(0xcdd6f4);
+
+    renderer.fillRect(tip_x -| 1, tip_y -| 1, tip_w + 2, tip_h + 2, border);
+    renderer.fillRect(tip_x, tip_y, tip_w, tip_h, bg);
+
+    var ly: u32 = tip_y + 2;
+    var lx: u32 = tip_x + cell_w / 2;
+    var lines_drawn: u32 = 0;
+    for (text) |ch| {
+        if (lines_drawn >= visible_lines) break;
+        if (ch == '\n') {
+            ly += cell_h;
+            lx = tip_x + cell_w / 2;
+            lines_drawn += 1;
+            continue;
+        }
+        if (lx + cell_w > tip_x + tip_w) continue;
+        const glyph = font.getGlyph(ch) catch continue;
+        const gx = @as(i32, @intCast(lx)) + glyph.bearing_x;
+        const gy = @as(i32, @intCast(ly)) + font.ascent - glyph.bearing_y;
+        renderer.drawGlyph(glyph, gx, gy, text_color);
+        lx += cell_w;
+    }
 }

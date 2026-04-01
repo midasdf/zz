@@ -537,6 +537,10 @@ pub const EditorView = struct {
         }
         self.highlighter.queryRange(vis_start, vis_end);
 
+        // Find matching bracket position (computed once per frame)
+        const match_pos = self.findMatchingBracket();
+        const match_lc = if (match_pos) |mp| self.buffer.offsetToLineCol(mp) else null;
+
         var screen_row: u32 = 0;
         while (screen_row < self.visible_rows) : (screen_row += 1) {
             const doc_line = self.scroll_line + screen_row;
@@ -599,6 +603,29 @@ pub const EditorView = struct {
                         const vcol = self.visualColAtOffset(clc.line, clc.col);
                         const cursor_px_x = code_x + self.left_pad + vcol * cell_w;
                         renderer.fillRect(cursor_px_x, row_y, 2, cell_h, theme.rosewater);
+                    }
+                }
+            }
+
+            // -- Matching bracket highlight --
+            if (match_lc) |mlc| {
+                if (mlc.line == doc_line) {
+                    const vcol = self.visualColAtOffset(mlc.line, mlc.col);
+                    const bx = code_x + self.left_pad + vcol * cell_w;
+                    // Background highlight
+                    renderer.fillRect(bx, row_y, cell_w, cell_h, theme.surface2);
+                    // Underline (2px at bottom)
+                    renderer.fillRect(bx, row_y + cell_h - 2, cell_w, 2, theme.lavender);
+                    // Re-draw the bracket character on top of the highlight
+                    if (match_pos) |mp| {
+                        const ms = self.buffer.contiguousSliceAt(mp);
+                        if (ms.len > 0 and ms[0] < 0x80) {
+                            if (font.getGlyph(ms[0])) |glyph| {
+                                const gx = @as(i32, @intCast(bx)) + glyph.bearing_x;
+                                const gy = @as(i32, @intCast(row_y)) + font.ascent - glyph.bearing_y;
+                                renderer.drawGlyph(glyph, gx, gy, theme.lavender);
+                            } else |_| {}
+                        }
                     }
                 }
             }
@@ -1026,6 +1053,247 @@ pub const EditorView = struct {
             digits += 1;
         }
         return @max(3, digits);
+    }
+
+    // ── Line operations ───────────────────────────────────────────
+
+    pub fn duplicateLine(self: *EditorView) !void {
+        const lc = self.buffer.offsetToLineCol(self.cursor.primary().head);
+        const line_start = self.buffer.lineToOffset(lc.line);
+        const next_line = if (lc.line + 1 < self.buffer.lineCount())
+            self.buffer.lineToOffset(lc.line + 1)
+        else
+            self.buffer.total_len;
+
+        // Get current line content
+        const line_len = next_line - line_start;
+        if (line_len == 0) return;
+
+        const content = self.buffer.collectContent(self.allocator) catch return;
+        defer self.allocator.free(content);
+        const line_text = content[line_start..next_line];
+
+        // If this is the last line (no trailing newline), prepend one
+        const needs_newline = (next_line == self.buffer.total_len and (line_text.len == 0 or line_text[line_text.len - 1] != '\n'));
+
+        if (needs_newline) {
+            // Insert newline + line text at end
+            var buf = self.allocator.alloc(u8, line_text.len + 1) catch return;
+            defer self.allocator.free(buf);
+            buf[0] = '\n';
+            @memcpy(buf[1..], line_text);
+            try self.buffer.insert(next_line, buf);
+            self.highlighter.notifyEdit(&self.buffer, next_line, next_line, next_line + @as(u32, @intCast(buf.len)));
+            self.cursor.moveTo(self.cursor.primary().head + @as(u32, @intCast(buf.len)));
+        } else {
+            // Insert copy at next line start
+            try self.buffer.insert(next_line, line_text);
+            self.highlighter.notifyEdit(&self.buffer, next_line, next_line, next_line + line_len);
+            self.cursor.moveTo(self.cursor.primary().head + line_len);
+        }
+        self.modified = true;
+        self.markAllDirty();
+    }
+
+    pub fn moveLineUp(self: *EditorView) !void {
+        const lc = self.buffer.offsetToLineCol(self.cursor.primary().head);
+        if (lc.line == 0) return;
+
+        const this_start = self.buffer.lineToOffset(lc.line);
+        const this_end = if (lc.line + 1 < self.buffer.lineCount())
+            self.buffer.lineToOffset(lc.line + 1)
+        else
+            self.buffer.total_len;
+        const prev_start = self.buffer.lineToOffset(lc.line - 1);
+
+        // Get this line's text
+        const content = self.buffer.collectContent(self.allocator) catch return;
+        defer self.allocator.free(content);
+        const this_line = self.allocator.dupe(u8, content[this_start..this_end]) catch return;
+        defer self.allocator.free(this_line);
+
+        // Delete this line, then insert before previous line
+        const del_len: u32 = this_end - this_start;
+        try self.buffer.delete(this_start, del_len);
+        self.highlighter.notifyEdit(&self.buffer, this_start, this_start + del_len, this_start);
+        try self.buffer.insert(prev_start, this_line);
+        self.highlighter.notifyEdit(&self.buffer, prev_start, prev_start, prev_start + @as(u32, @intCast(this_line.len)));
+
+        // Adjust cursor to same column on new line position
+        self.cursor.moveTo(prev_start + lc.col);
+        self.modified = true;
+        self.markAllDirty();
+        self.ensureCursorVisible();
+    }
+
+    pub fn moveLineDown(self: *EditorView) !void {
+        const lc = self.buffer.offsetToLineCol(self.cursor.primary().head);
+        const total = self.buffer.lineCount();
+        if (lc.line + 1 >= total) return;
+
+        const this_start = self.buffer.lineToOffset(lc.line);
+        const this_end = self.buffer.lineToOffset(lc.line + 1);
+        const next_end = if (lc.line + 2 < total)
+            self.buffer.lineToOffset(lc.line + 2)
+        else
+            self.buffer.total_len;
+
+        // Get this line's text and next line's text
+        const content = self.buffer.collectContent(self.allocator) catch return;
+        defer self.allocator.free(content);
+        const this_line = self.allocator.dupe(u8, content[this_start..this_end]) catch return;
+        defer self.allocator.free(this_line);
+        const next_line_text = self.allocator.dupe(u8, content[this_end..next_end]) catch return;
+        defer self.allocator.free(next_line_text);
+
+        // Delete both lines (from this_start to next_end)
+        const both_len: u32 = next_end - this_start;
+        try self.buffer.delete(this_start, both_len);
+        self.highlighter.notifyEdit(&self.buffer, this_start, this_start + both_len, this_start);
+
+        // Insert next line first, then this line
+        try self.buffer.insert(this_start, next_line_text);
+        self.highlighter.notifyEdit(&self.buffer, this_start, this_start, this_start + @as(u32, @intCast(next_line_text.len)));
+        const new_this_start = this_start + @as(u32, @intCast(next_line_text.len));
+        try self.buffer.insert(new_this_start, this_line);
+        self.highlighter.notifyEdit(&self.buffer, new_this_start, new_this_start, new_this_start + @as(u32, @intCast(this_line.len)));
+
+        // Cursor stays at same column on the moved line
+        self.cursor.moveTo(new_this_start + lc.col);
+        self.modified = true;
+        self.markAllDirty();
+        self.ensureCursorVisible();
+    }
+
+    pub fn deleteLine(self: *EditorView) !void {
+        const lc = self.buffer.offsetToLineCol(self.cursor.primary().head);
+        const line_start = self.buffer.lineToOffset(lc.line);
+        const next_line = if (lc.line + 1 < self.buffer.lineCount())
+            self.buffer.lineToOffset(lc.line + 1)
+        else
+            self.buffer.total_len;
+
+        if (next_line > line_start) {
+            const del_len = next_line - line_start;
+            try self.buffer.delete(line_start, del_len);
+            self.highlighter.notifyEdit(&self.buffer, line_start, line_start + del_len, line_start);
+            self.cursor.moveTo(line_start);
+            self.modified = true;
+            self.markAllDirty();
+        }
+    }
+
+    // ── Auto-indent newline ───────────────────────────────────────
+
+    pub fn insertNewline(self: *EditorView) !void {
+        const lc = self.buffer.offsetToLineCol(self.cursor.primary().head);
+        const line_start = self.buffer.lineToOffset(lc.line);
+
+        // Count leading whitespace of current line
+        var indent_len: u32 = 0;
+        var off = line_start;
+        while (off < self.buffer.total_len) {
+            const s = self.buffer.contiguousSliceAt(off);
+            if (s.len == 0) break;
+            if (s[0] == ' ') {
+                indent_len += 1;
+                off += 1;
+            } else if (s[0] == '\t') {
+                indent_len += 4;
+                off += 1;
+            } else break;
+        }
+
+        // Check if character before cursor is an opener bracket
+        var extra_indent = false;
+        const head = self.cursor.primary().head;
+        if (head > line_start) {
+            const before = self.buffer.contiguousSliceAt(head - 1);
+            if (before.len > 0) {
+                extra_indent = (before[0] == '{' or before[0] == '(' or before[0] == '[' or before[0] == ':');
+            }
+        }
+
+        // Build newline + indent
+        var buf: [256]u8 = undefined;
+        buf[0] = '\n';
+        const total_indent = indent_len + if (extra_indent) @as(u32, 4) else 0;
+        const safe_indent = @min(total_indent, buf.len - 1);
+        @memset(buf[1..][0..safe_indent], ' ');
+
+        try self.insertAtCursor(buf[0 .. safe_indent + 1]);
+    }
+
+    // ── Bracket matching ──────────────────────────────────────────
+
+    const BracketPair = struct { open: u8, close: u8, forward: bool };
+
+    pub fn findMatchingBracket(self: *const EditorView) ?u32 {
+        const pos = self.cursor.primary().head;
+        if (pos >= self.buffer.total_len) return null;
+
+        const slice = self.buffer.contiguousSliceAt(pos);
+        if (slice.len == 0) return null;
+
+        const ch = slice[0];
+        const info = getBracketPair(ch) orelse return null;
+
+        if (info.forward) {
+            return self.searchBracketForward(pos + 1, info.open, info.close);
+        } else {
+            return self.searchBracketBackward(pos, info.open, info.close);
+        }
+    }
+
+    fn getBracketPair(ch: u8) ?BracketPair {
+        return switch (ch) {
+            '(' => .{ .open = '(', .close = ')', .forward = true },
+            ')' => .{ .open = '(', .close = ')', .forward = false },
+            '[' => .{ .open = '[', .close = ']', .forward = true },
+            ']' => .{ .open = '[', .close = ']', .forward = false },
+            '{' => .{ .open = '{', .close = '}', .forward = true },
+            '}' => .{ .open = '{', .close = '}', .forward = false },
+            else => null,
+        };
+    }
+
+    fn searchBracketForward(self: *const EditorView, start: u32, open: u8, close: u8) ?u32 {
+        var depth: i32 = 1;
+        var off = start;
+        while (off < self.buffer.total_len) {
+            const s = self.buffer.contiguousSliceAt(off);
+            if (s.len == 0) break;
+            for (s) |byte| {
+                if (byte == open) {
+                    depth += 1;
+                } else if (byte == close) {
+                    depth -= 1;
+                    if (depth == 0) return off;
+                }
+                off += 1;
+            }
+        }
+        return null;
+    }
+
+    fn searchBracketBackward(self: *const EditorView, pos: u32, open: u8, close: u8) ?u32 {
+        if (pos == 0) return null;
+        var depth: i32 = 1;
+        var off = pos - 1;
+        while (true) {
+            const s = self.buffer.contiguousSliceAt(off);
+            if (s.len == 0) break;
+            const byte = s[0];
+            if (byte == close) {
+                depth += 1;
+            } else if (byte == open) {
+                depth -= 1;
+                if (depth == 0) return off;
+            }
+            if (off == 0) break;
+            off -= 1;
+        }
+        return null;
     }
 };
 

@@ -25,10 +25,19 @@ pub const Location = struct {
     col: u32,
 };
 
+pub const FormattingEdit = struct {
+    start_line: u32,
+    start_col: u32,
+    end_line: u32,
+    end_col: u32,
+    new_text: []u8, // Owned
+};
+
 pub const ServerCapabilities = struct {
     has_completion: bool = false,
     has_definition: bool = false,
     has_hover: bool = false,
+    has_formatting: bool = false,
 };
 
 // ── LSP Client ──────────────────────────────────────────────────────
@@ -66,10 +75,15 @@ pub const LspClient = struct {
     // Document version counter for textDocument/didChange
     doc_version: u32,
 
+    // Pending formatting response
+    formatting_edits: std.ArrayList(FormattingEdit),
+    has_formatting: bool,
+
     // Track pending request IDs
     pending_completion_id: ?u32,
     pending_definition_id: ?u32,
     pending_hover_id: ?u32,
+    pending_formatting_id: ?u32,
 
     pub fn init(allocator: std.mem.Allocator) LspClient {
         return .{
@@ -85,6 +99,8 @@ pub const LspClient = struct {
             .has_goto = false,
             .hover_text = null,
             .has_hover = false,
+            .formatting_edits = .{},
+            .has_formatting = false,
             .read_buf = undefined,
             .read_pos = 0,
             .msg_buf = .{},
@@ -93,6 +109,7 @@ pub const LspClient = struct {
             .pending_completion_id = null,
             .pending_definition_id = null,
             .pending_hover_id = null,
+            .pending_formatting_id = null,
         };
     }
 
@@ -161,6 +178,8 @@ pub const LspClient = struct {
             self.allocator.free(ht);
             self.hover_text = null;
         }
+        self.freeFormattingEdits();
+        self.formatting_edits.deinit(self.allocator);
         self.msg_buf.deinit(self.allocator);
     }
 
@@ -244,6 +263,15 @@ pub const LspClient = struct {
         , .{ uri, line, col }) catch return;
         self.pending_hover_id = self.next_id;
         self.sendRequest("textDocument/hover", params);
+    }
+
+    pub fn requestFormatting(self: *LspClient, uri: []const u8) void {
+        var params_buf: [1024]u8 = undefined;
+        const params = std.fmt.bufPrint(&params_buf,
+            \\{{"textDocument":{{"uri":"{s}"}},"options":{{"tabSize":4,"insertSpaces":true}}}}
+        , .{uri}) catch return;
+        self.pending_formatting_id = self.next_id;
+        self.sendRequest("textDocument/formatting", params);
     }
 
     // ── Message Processing ──────────────────────────────────────────
@@ -437,6 +465,14 @@ pub const LspClient = struct {
                 return;
             }
         }
+
+        if (self.pending_formatting_id) |fid| {
+            if (id == fid) {
+                self.pending_formatting_id = null;
+                self.handleFormattingResponse(result);
+                return;
+            }
+        }
     }
 
     fn parseServerCapabilities(self: *LspClient, result: std.json.Value) void {
@@ -462,6 +498,12 @@ pub const LspClient = struct {
         }
         if (caps.get("hoverProvider")) |hp| {
             self.server_capabilities.has_hover = switch (hp) {
+                .bool => |b| b,
+                else => true,
+            };
+        }
+        if (caps.get("documentFormattingProvider")) |fp| {
+            self.server_capabilities.has_formatting = switch (fp) {
                 .bool => |b| b,
                 else => true,
             };
@@ -737,6 +779,68 @@ pub const LspClient = struct {
         }
     }
 
+    fn handleFormattingResponse(self: *LspClient, result: std.json.Value) void {
+        self.freeFormattingEdits();
+        self.has_formatting = true;
+
+        // Result is TextEdit[] or null
+        const edits = switch (result) {
+            .array => |a| a.items,
+            .null => return,
+            else => return,
+        };
+
+        for (edits) |edit_val| {
+            const edit = switch (edit_val) {
+                .object => |o| o,
+                else => continue,
+            };
+
+            const new_text_str = blk: {
+                const v = edit.get("newText") orelse continue;
+                break :blk switch (v) {
+                    .string => |s| s,
+                    else => continue,
+                };
+            };
+
+            const range_val = edit.get("range") orelse continue;
+            const range = switch (range_val) {
+                .object => |o| o,
+                else => continue,
+            };
+
+            const start_val = range.get("start") orelse continue;
+            const range_start = switch (start_val) {
+                .object => |o| o,
+                else => continue,
+            };
+
+            const end_val = range.get("end") orelse continue;
+            const range_end = switch (end_val) {
+                .object => |o| o,
+                else => continue,
+            };
+
+            const start_line = jsonGetU32(range_start, "line") orelse continue;
+            const start_col = jsonGetU32(range_start, "character") orelse 0;
+            const end_line = jsonGetU32(range_end, "line") orelse continue;
+            const end_col = jsonGetU32(range_end, "character") orelse 0;
+
+            const owned_text = self.allocator.dupe(u8, new_text_str) catch continue;
+            self.formatting_edits.append(self.allocator, .{
+                .start_line = start_line,
+                .start_col = start_col,
+                .end_line = end_line,
+                .end_col = end_col,
+                .new_text = owned_text,
+            }) catch {
+                self.allocator.free(owned_text);
+                continue;
+            };
+        }
+    }
+
     // ── JSON-RPC Transport ──────────────────────────────────────────
 
     fn sendRequest(self: *LspClient, method: []const u8, params: []const u8) void {
@@ -841,6 +945,13 @@ pub const LspClient = struct {
             if (item.detail) |d| self.allocator.free(d);
         }
         self.completion_items.clearRetainingCapacity();
+    }
+
+    fn freeFormattingEdits(self: *LspClient) void {
+        for (self.formatting_edits.items) |edit| {
+            self.allocator.free(edit.new_text);
+        }
+        self.formatting_edits.clearRetainingCapacity();
     }
 };
 

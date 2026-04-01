@@ -51,13 +51,22 @@ pub const Action = enum {
     next_tab,
     prev_tab,
     close_tab,
+    // Line operations
+    duplicate_line,
+    move_line_up,
+    move_line_down,
+    delete_line,
     // Multi-cursor
     select_next_occurrence,
     select_all_occurrences,
     escape,
+    // Find & Replace
+    find_replace,
     // LSP
     goto_definition,
     hover,
+    trigger_completion,
+    format_document,
     // Panes
     split_vertical,
     split_horizontal,
@@ -67,6 +76,8 @@ pub const Action = enum {
     toggle_sidebar,
     // Terminal
     toggle_terminal,
+    // Project search
+    find_in_project,
 };
 
 pub fn modFromWindow(mods: Window.Modifiers) Modifier {
@@ -87,6 +98,8 @@ pub fn mapKey(keysym: u32, mods: Modifier) ?Action {
         if (keysym == Window.XK_backslash) return .split_vertical;
         // Ctrl+` -> toggle terminal
         if (keysym == Window.XK_grave) return .toggle_terminal;
+        // Ctrl+Space -> trigger completion
+        if (keysym == ' ') return .trigger_completion;
         const k = if (keysym >= 'A' and keysym <= 'Z') keysym + 32 else keysym;
         return switch (k) {
             'a' => .select_all,
@@ -100,6 +113,7 @@ pub fn mapKey(keysym: u32, mods: Modifier) ?Action {
             'w' => .close_tab,
             'p' => .finder_files,
             'f' => .find,
+            'h' => .find_replace,
             'd' => .select_next_occurrence,
             'g' => .goto_line,
             else => null,
@@ -113,6 +127,10 @@ pub fn mapKey(keysym: u32, mods: Modifier) ?Action {
         return switch (keysym) {
             'z', 'Z' => .redo,
             'p', 'P' => .command_palette,
+            'd', 'D' => .duplicate_line,
+            'k', 'K' => .delete_line,
+            'f', 'F' => .find_in_project,
+            'i', 'I' => .format_document,
             'l', 'L' => .select_all_occurrences,
             'w', 'W' => .close_pane,
             else => null,
@@ -121,6 +139,9 @@ pub fn mapKey(keysym: u32, mods: Modifier) ?Action {
     if (mods == .alt) {
         // Alt+\ -> focus next pane
         if (keysym == Window.XK_backslash) return .focus_next_pane;
+        // Alt+Up/Down -> move line up/down
+        if (keysym == Window.XK_Up) return .move_line_up;
+        if (keysym == Window.XK_Down) return .move_line_down;
     }
 
     // Shift+arrow = selection
@@ -151,6 +172,7 @@ pub fn mapKey(keysym: u32, mods: Modifier) ?Action {
         Window.XK_Return => .enter,
         Window.XK_Tab => .tab,
         Window.XK_Escape => .escape,
+        Window.XK_F11 => .hover,
         Window.XK_F12 => .goto_definition,
         else => null,
     };

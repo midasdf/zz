@@ -21,6 +21,11 @@ pub const Overlay = struct {
     items: []const []const u8 = &.{}, // Current filtered items to display
     active: bool = false,
     title: []const u8 = "",
+    // Secondary input field (for find & replace)
+    secondary_buf: ?*[256]u8 = null,
+    secondary_len: ?*u32 = null,
+    secondary_label: []const u8 = "",
+    secondary_active: bool = false, // Is secondary field focused?
 
     pub fn open(self: *Overlay, title: []const u8) void {
         self.active = true;
@@ -28,6 +33,10 @@ pub const Overlay = struct {
         self.selected = 0;
         self.scroll_offset = 0;
         self.title = title;
+        self.secondary_buf = null;
+        self.secondary_len = null;
+        self.secondary_label = "";
+        self.secondary_active = false;
     }
 
     pub fn close(self: *Overlay) void {
@@ -91,7 +100,9 @@ pub const Overlay = struct {
         // Overlay dimensions: 60% width, up to 50% height
         const box_w = @min(win_w * 6 / 10, 800);
         const max_visible: u32 = @min(win_h / cell_h / 2, 15);
-        const box_h = (max_visible + 3) * cell_h; // +3 for title, input, padding
+        const has_secondary = self.secondary_buf != null;
+        const extra_rows: u32 = if (has_secondary) 2 else 0; // label + input
+        const box_h = (max_visible + 3 + extra_rows) * cell_h;
         const box_x = (win_w - box_w) / 2;
         const box_y = win_h / 6; // Upper third
 
@@ -118,10 +129,11 @@ pub const Overlay = struct {
         }
         y += cell_h;
 
-        // Input field
+        // Input field (search)
         const input_x = box_x + cell_w / 2;
         const input_w = box_w - cell_w;
-        renderer.fillRect(input_x, y, input_w, cell_h + 4, overlay_input_bg);
+        const search_bg = if (has_secondary and self.secondary_active) overlay_bg else overlay_input_bg;
+        renderer.fillRect(input_x, y, input_w, cell_h + 4, search_bg);
 
         // Input text
         {
@@ -134,10 +146,50 @@ pub const Overlay = struct {
                 renderer.drawGlyph(glyph, gx, gy, overlay_text);
                 ix += cell_w;
             }
-            // Cursor
-            renderer.fillRect(ix, y + 2, 2, cell_h, overlay_accent);
+            // Cursor only if search field is active
+            if (!has_secondary or !self.secondary_active) {
+                renderer.fillRect(ix, y + 2, 2, cell_h, overlay_accent);
+            }
         }
         y += cell_h + 8;
+
+        // Secondary input field (replace)
+        if (has_secondary) {
+            // Label
+            {
+                var tx = box_x + cell_w;
+                for (self.secondary_label) |ch| {
+                    const glyph = font.getGlyph(ch) catch continue;
+                    renderer.fillRect(tx, y, cell_w, cell_h, overlay_bg);
+                    const gx: i32 = @intCast(tx);
+                    const gy: i32 = @as(i32, @intCast(y)) + font.ascent - @as(i32, glyph.bearing_y);
+                    renderer.drawGlyph(glyph, gx, gy, overlay_dim);
+                    tx += cell_w;
+                }
+            }
+            y += cell_h;
+
+            const replace_bg = if (self.secondary_active) overlay_input_bg else overlay_bg;
+            renderer.fillRect(input_x, y, input_w, cell_h + 4, replace_bg);
+
+            // Replace text
+            if (self.secondary_buf) |sbuf| {
+                const slen = if (self.secondary_len) |sl| sl.* else 0;
+                var ix = input_x + 4;
+                for (sbuf[0..slen]) |ch| {
+                    const glyph = font.getGlyph(ch) catch continue;
+                    const gx: i32 = @intCast(ix);
+                    const gy: i32 = @as(i32, @intCast(y + 2)) + font.ascent - @as(i32, glyph.bearing_y);
+                    renderer.drawGlyph(glyph, gx, gy, overlay_text);
+                    ix += cell_w;
+                }
+                // Cursor only if replace field is active
+                if (self.secondary_active) {
+                    renderer.fillRect(ix, y + 2, 2, cell_h, overlay_accent);
+                }
+            }
+            y += cell_h + 8;
+        }
 
         // Separator
         renderer.fillRect(box_x + cell_w / 2, y, box_w - cell_w, 1, overlay_border);
