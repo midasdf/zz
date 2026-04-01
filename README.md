@@ -37,7 +37,12 @@ A lightweight, fast code editor written in Zig. No AI, no telemetry, no bloat.
 - **Tabs** with multi-file editing
 - **Auto-indent** on Enter (copies whitespace, extra indent after `{`)
 - **Line operations** (duplicate, move up/down, delete)
-- **Bracket matching** with highlight
+- **Bracket matching** with highlight and auto-closing
+- **Word occurrence highlighting** on cursor
+- **Indent guides** (vertical lines at tab stops)
+- **Trailing whitespace** visualization and trim-on-save
+- **Smart selection** (Ctrl+Shift+Up/Down expand/shrink)
+- **4 themes**: Catppuccin Mocha, Tokyo Night, Gruvbox Dark, One Dark
 - **UTF-8** with CJK wide character support
 - **XIM/fcitx5** input method for Japanese/Chinese
 
@@ -61,6 +66,9 @@ A lightweight, fast code editor written in Zig. No AI, no telemetry, no bloat.
 - **Ctrl+Shift+O** go to symbol (LSP document symbols)
 - **Code folding** (Ctrl+Shift+[) with bracket matching
 - **Minimap** code overview with syntax colors
+- **F2** rename symbol, **Ctrl+.** code actions, **Shift+F12** references
+- **LSP signature help** (auto-trigger on `(` and `,`)
+- **F8** / **Shift+F8** navigate diagnostics
 
 ### Extras
 - **File tree** sidebar (Ctrl+B) with expand/collapse
@@ -93,7 +101,7 @@ sudo pacman -S zls               # Zig
 git clone https://github.com/midasdf/zz.git
 cd zz
 zig build                        # Debug build
-zig build -Doptimize=ReleaseFast  # Release build (3.1MB)
+zig build -Doptimize=ReleaseFast  # Release build (~4MB)
 ```
 
 ## Usage
@@ -144,6 +152,23 @@ zig build -Doptimize=ReleaseFast  # Release build (3.1MB)
 | Ctrl+Shift+K | Delete line |
 | Ctrl+Shift+O | Go to symbol |
 | Ctrl+Shift+[ | Toggle code fold |
+| Ctrl+/ | Toggle line comment |
+| Ctrl+L | Select line |
+| Ctrl+J | Join lines |
+| Ctrl+Enter | Insert line below |
+| Ctrl+Shift+Enter | Insert line above |
+| F2 | Rename symbol |
+| Ctrl+. | Code actions |
+| Shift+F12 | Go to references |
+| F8 / Shift+F8 | Next / prev diagnostic |
+| Ctrl+Backspace | Delete word left |
+| Ctrl+Delete | Delete word right |
+| Tab (selection) | Indent lines |
+| Shift+Tab | Outdent lines |
+| Ctrl+Home / End | Start / end of file |
+| Ctrl+Up / Down | Scroll without cursor |
+| Ctrl+M | Go to matching bracket |
+| Ctrl+Shift+Up / Down | Expand / shrink selection |
 
 ## Architecture
 
@@ -174,7 +199,7 @@ src/
     └── keymap.zig        Keybind mapping
 ```
 
-**~13,000 lines of Zig. Zero external Zig dependencies.**
+**~16,000 lines of Zig. Zero external Zig dependencies.**
 
 All rendering is CPU-based (xcb shared memory). No GPU, no OpenGL, no Wayland (yet). Single-threaded epoll event loop. The only subprocess communication is with LSP servers (JSON-RPC over stdin/stdout) and the embedded terminal (PTY).
 
@@ -182,12 +207,12 @@ All rendering is CPU-based (xcb shared memory). No GPU, no OpenGL, no Wayland (y
 
 | Metric | Value |
 |--------|-------|
-| Binary (ReleaseFast) | 3.4 MB |
+| Binary (ReleaseFast) | 4.1 MB |
 | Binary (ReleaseSmall + strip) | ~240 KB |
 | Memory (RSS) | ~18 MB |
 | Idle CPU | 0% |
 | Startup time | Instant (mmap + single piece) |
-| Source lines | ~13,000 |
+| Source lines | ~16,000 |
 | Dependencies (Zig packages) | 0 |
 
 ## License
