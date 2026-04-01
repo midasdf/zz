@@ -1424,15 +1424,27 @@ const ParsedSearchResult = struct {
 
 fn parseSearchResult(result: []const u8) ?ParsedSearchResult {
     // Format: "path:line: content"
-    // Find first colon (end of path)
-    const colon1 = std.mem.indexOfScalar(u8, result, ':') orelse return null;
-    if (colon1 + 1 >= result.len) return null;
-    // Find second colon (end of line number)
-    const rest = result[colon1 + 1 ..];
-    const colon2 = std.mem.indexOfScalar(u8, rest, ':') orelse return null;
-    const line_str = rest[0..colon2];
-    const line_num = std.fmt.parseInt(u32, line_str, 10) catch return null;
-    return .{ .path = result[0..colon1], .line = line_num };
+    // Find the line number by looking for :DIGITS: pattern
+    // Scan for a colon followed by digits followed by colon
+    var i: usize = 0;
+    while (i < result.len) {
+        if (result[i] == ':' and i + 1 < result.len) {
+            // Check if digits follow
+            var j = i + 1;
+            while (j < result.len and result[j] >= '0' and result[j] <= '9') j += 1;
+            if (j > i + 1 and j < result.len and result[j] == ':') {
+                // Found :DIGITS: pattern
+                const line_str = result[i + 1 .. j];
+                const line_num = std.fmt.parseInt(u32, line_str, 10) catch {
+                    i += 1;
+                    continue;
+                };
+                return .{ .path = result[0..i], .line = line_num };
+            }
+        }
+        i += 1;
+    }
+    return null;
 }
 
 fn findNext(editor: *EditorView, query: []const u8) void {
@@ -1616,14 +1628,14 @@ fn applyFormattingEdits(editor: *EditorView, lsp_client: *lsp.LspClient) void {
     const items = lsp_client.formatting_edits.items;
     if (items.len == 0) return;
 
-    var sorted: [256]usize = undefined;
-    const count = @min(items.len, 256);
-    for (0..count) |sort_i| {
-        sorted[sort_i] = sort_i;
-    }
+    // Build index array sorted descending by position (back-to-front)
+    const sorted = editor.allocator.alloc(usize, items.len) catch return;
+    defer editor.allocator.free(sorted);
+    for (sorted, 0..) |*s, i| s.* = i;
+
     // Insertion sort descending by position
     var sort_i: usize = 1;
-    while (sort_i < count) : (sort_i += 1) {
+    while (sort_i < sorted.len) : (sort_i += 1) {
         var j = sort_i;
         while (j > 0) {
             const a = items[sorted[j]];
@@ -1638,9 +1650,8 @@ fn applyFormattingEdits(editor: *EditorView, lsp_client: *lsp.LspClient) void {
     }
 
     const saved_pos = editor.cursor.primary().head;
-    const saved_lc = editor.buffer.offsetToLineCol(saved_pos);
 
-    for (sorted[0..count]) |idx| {
+    for (sorted) |idx| {
         const edit = items[idx];
         const start_off = editor.buffer.lineToOffset(edit.start_line) + edit.start_col;
         const end_off = editor.buffer.lineToOffset(edit.end_line) + edit.end_col;
@@ -1654,8 +1665,7 @@ fn applyFormattingEdits(editor: *EditorView, lsp_client: *lsp.LspClient) void {
         }
     }
 
-    const restored_off = editor.buffer.lineToOffset(saved_lc.line) + saved_lc.col;
-    editor.cursor.moveTo(@min(restored_off, editor.buffer.total_len));
+    editor.cursor.moveTo(@min(saved_pos, editor.buffer.total_len));
     editor.ensureCursorVisible();
     editor.modified = true;
     editor.markAllDirty();

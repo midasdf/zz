@@ -1180,6 +1180,7 @@ pub const EditorView = struct {
             self.cursor.moveTo(line_start);
             self.modified = true;
             self.markAllDirty();
+            self.ensureCursorVisible();
         }
     }
 
