@@ -214,6 +214,17 @@ pub const EditorView = struct {
     sticky_scroll_visible: bool = true,
     folded_lines: std.AutoHashMap(u32, u32), // start_line -> end_line (exclusive)
 
+    // Status bar action buttons — state passed from main, hit-boxes written by renderStatusBar
+    status_terminal_visible: bool = false,
+    status_diagnostic_count: u32 = 0,
+    status_btn_terminal_x: u32 = 0, // pixel x of terminal button
+    status_btn_terminal_w: u32 = 0, // pixel width of terminal button
+    status_btn_diag_x: u32 = 0, // pixel x of diagnostics button
+    status_btn_diag_w: u32 = 0, // pixel width of diagnostics button
+    status_btn_gear_x: u32 = 0, // pixel x of settings gear
+    status_btn_gear_w: u32 = 0, // pixel width of settings gear
+    status_bar_y: u32 = 0, // pixel y of status bar top
+
     pub fn init(allocator: std.mem.Allocator, content: []const u8) !EditorView {
         var buffer = try PieceTable.init(allocator, content);
         errdefer buffer.deinit();

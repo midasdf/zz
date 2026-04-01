@@ -236,6 +236,8 @@ pub fn main() !void {
     {
         const editor = tab_mgr.activeView();
         editor.lsp_diagnostics = lsp_client.diagnostics.items;
+        editor.status_terminal_visible = terminal.visible;
+        editor.status_diagnostic_count = @intCast(lsp_client.diagnostics.items.len);
         file_tree.active_path = if (editor.file_path) |p| p else null;
         renderFrame(&tab_mgr, &pane_mgr, &win, &font, &overlay, &file_tree, &terminal, &lsp_client, completion_active, completion_selected, hover_active, signature_active);
     }
@@ -546,6 +548,9 @@ pub fn main() !void {
                                         syncPaneToActiveTab(&pane_mgr, &tab_mgr);
                                         recomputeGitDiff(&git_info, tab_mgr.activeView());
                                         file_tree.active_path = if (pane_mgr.active_leaf.file_path) |p| p else null;
+                                    } else if (handleStatusBarClick(pane_mgr.active_leaf, me.x, me.y, &terminal, epoll_fd, &pty_registered, &pane_mgr, &file_tree, tab_bar_h, win.width, win.height, &font)) {
+                                        // Status bar button was clicked — handled above
+                                        markAllPanesDirty(&pane_mgr);
                                     } else {
                                         // Determine which pane was clicked
                                         if (pane_mgr.isSplit()) {
@@ -788,6 +793,8 @@ pub fn main() !void {
         {
             const editor = pane_mgr.active_leaf;
             editor.lsp_diagnostics = lsp_client.diagnostics.items;
+            editor.status_terminal_visible = terminal.visible;
+            editor.status_diagnostic_count = @intCast(lsp_client.diagnostics.items.len);
             renderFrame(&tab_mgr, &pane_mgr, &win, &font, &overlay, &file_tree, &terminal, &lsp_client, completion_active, completion_selected, hover_active, signature_active);
         }
     }
@@ -882,6 +889,93 @@ fn syncTabToActivePane(pane_mgr: *PaneManager, tab_mgr: *TabManager) void {
             return;
         }
     }
+}
+
+/// Check if a click at (mx, my) hits a status bar action button.
+/// Returns true if a button was clicked and handled.
+fn handleStatusBarClick(
+    editor: *EditorView,
+    mx: i32,
+    my: i32,
+    term: *Terminal,
+    epoll_fd: std.posix.fd_t,
+    pty_registered: *?std.posix.fd_t,
+    pane_mgr: *PaneManager,
+    file_tree: *FileTree,
+    tab_bar_h: u32,
+    win_w: u32,
+    win_h: u32,
+    font: *const FontFace,
+) bool {
+    // Status bar Y: check if click is below the status bar top
+    if (my < 0 or @as(u32, @intCast(my)) < editor.status_bar_y) return false;
+
+    const px: u32 = if (mx >= 0) @intCast(mx) else return false;
+
+    // Terminal button
+    if (editor.status_btn_terminal_w > 0 and
+        px >= editor.status_btn_terminal_x and
+        px < editor.status_btn_terminal_x + editor.status_btn_terminal_w)
+    {
+        term.toggle();
+        // Register/deregister PTY fd with epoll
+        if (term.visible) {
+            if (term.getPtyFd()) |pty_fd| {
+                if (pty_registered.* == null) {
+                    var pty_ev = std.os.linux.epoll_event{
+                        .events = std.os.linux.EPOLL.IN,
+                        .data = .{ .u32 = 3 },
+                    };
+                    std.posix.epoll_ctl(epoll_fd, std.os.linux.EPOLL.CTL_ADD, pty_fd, &pty_ev) catch |err| logError("PTY epoll register", err);
+                    pty_registered.* = pty_fd;
+                }
+            }
+        } else {
+            if (pty_registered.*) |reg_fd| {
+                std.posix.epoll_ctl(epoll_fd, std.os.linux.EPOLL.CTL_DEL, reg_fd, null) catch {}; // non-fatal
+                pty_registered.* = null;
+            }
+        }
+        relayoutWithTerminal(pane_mgr, file_tree, term, tab_bar_h, win_w, win_h, font);
+        return true;
+    }
+
+    // Diagnostics button — jump to next diagnostic
+    if (editor.status_btn_diag_w > 0 and
+        px >= editor.status_btn_diag_x and
+        px < editor.status_btn_diag_x + editor.status_btn_diag_w)
+    {
+        if (editor.lsp_diagnostics.len > 0) {
+            // Find the next diagnostic after the current cursor line
+            const cursor_line = editor.buffer.offsetToLineCol(editor.cursor.primary().head).line;
+            var best: ?u32 = null;
+            var first: ?u32 = null;
+            for (editor.lsp_diagnostics) |diag| {
+                if (first == null or diag.line < first.?) first = diag.line;
+                if (diag.line > cursor_line) {
+                    if (best == null or diag.line < best.?) best = diag.line;
+                }
+            }
+            // Wrap around to first diagnostic if none found after cursor
+            const target_line = best orelse (first orelse 0);
+            const offset = editor.buffer.lineToOffset(target_line);
+            editor.cursor.moveTo(offset);
+            editor.ensureCursorVisible();
+            editor.markAllDirty();
+        }
+        return true;
+    }
+
+    // Settings gear — currently a no-op placeholder (future: open config)
+    if (editor.status_btn_gear_w > 0 and
+        px >= editor.status_btn_gear_x and
+        px < editor.status_btn_gear_x + editor.status_btn_gear_w)
+    {
+        // Placeholder: no action yet
+        return true;
+    }
+
+    return false;
 }
 
 fn markAllPanesDirty(pane_mgr: *PaneManager) void {

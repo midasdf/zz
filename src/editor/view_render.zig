@@ -822,7 +822,7 @@ fn renderCodeLine(
     }
 }
 
-fn renderStatusBar(self: *const EditorView, renderer: *Renderer, font: *FontFace, cursor_line: u32, cursor_col: u32) void {
+fn renderStatusBar(self: *EditorView, renderer: *Renderer, font: *FontFace, cursor_line: u32, cursor_col: u32) void {
     const active_theme = view_mod.getActiveTheme();
     const cell_w = font.cell_width;
     const cell_h = font.cell_height;
@@ -832,6 +832,9 @@ fn renderStatusBar(self: *const EditorView, renderer: *Renderer, font: *FontFace
     // Status bar: 1px top border + cell_height + 4px vertical padding
     const bar_pad: u32 = 4; // 2px top + 2px bottom padding
     const status_y = self.y_offset + self.visible_rows * cell_h;
+
+    // Store status bar Y for click detection
+    self.status_bar_y = status_y;
 
     // Top border (1px surface2) — subtle separator
     renderer.fillRect(xo, status_y, pw, 1, active_theme.surface2);
@@ -973,8 +976,114 @@ fn renderStatusBar(self: *const EditorView, renderer: *Renderer, font: *FontFace
     var right_buf: [192]u8 = undefined;
     const right_str = formatStatusRight(cursor_line + 1, cursor_col + 1, lang_name, "", &right_buf);
     const right_len: u32 = @intCast(right_str.len);
-    const right_start = if (pw / cell_w > right_len + 1) pw / cell_w - right_len - 1 else 0;
 
+    // -- Action buttons (rendered right-of-center, before the right info section) --
+    // Layout: ... [Terminal] [! N] [*] ...  Zig  Ln 1, Col 5  UTF-8
+    // We place buttons just left of the right section.
+    const btn_pad: u32 = 2; // columns of padding around each button
+
+    // Compute button labels
+    // Use simple ASCII labels for reliable rendering
+    const term_text: []const u8 = if (self.status_terminal_visible) "Terminal v" else "Terminal >";
+    const term_text_len: u32 = @intCast(term_text.len);
+
+    var diag_buf: [20]u8 = undefined;
+    const diag_count = self.status_diagnostic_count;
+    // Format: "! N" or "0" when no issues
+    var diag_pos: usize = 0;
+    if (diag_count > 0) {
+        diag_buf[0] = '!';
+        diag_buf[1] = ' ';
+        diag_pos = 2;
+        var count_buf: [12]u8 = undefined;
+        const count_str = formatU32(diag_count, &count_buf);
+        @memcpy(diag_buf[diag_pos..][0..count_str.len], count_str);
+        diag_pos += count_str.len;
+    } else {
+        const no_issues = "0 issues";
+        @memcpy(diag_buf[0..no_issues.len], no_issues);
+        diag_pos = no_issues.len;
+    }
+    const diag_text = diag_buf[0..diag_pos];
+    const diag_text_len: u32 = @intCast(diag_text.len);
+
+    const gear_text: []const u8 = "*";
+    const gear_text_len: u32 = 1;
+
+    // Total button area width in columns: pad + term + pad + pad + diag + pad + pad + gear + pad
+    const btn_total_cols = btn_pad + term_text_len + btn_pad + 1 + btn_pad + diag_text_len + btn_pad + 1 + btn_pad + gear_text_len + btn_pad;
+
+    // Place buttons so they end just before the right section
+    const right_start = if (pw / cell_w > right_len + 1) pw / cell_w - right_len - 1 else 0;
+    const btn_start_col = if (right_start > btn_total_cols + 2) right_start - btn_total_cols - 2 else left_col + 2;
+
+    // Only render buttons if there's room between left and right sections
+    if (btn_start_col > left_col + 1) {
+        var bcol = btn_start_col;
+
+        // -- Terminal button with subtle background --
+        const term_btn_x = xo + bcol * cell_w;
+        const term_bg = if (self.status_terminal_visible) active_theme.surface1 else active_theme.surface0;
+        const term_fg = if (self.status_terminal_visible) active_theme.lavender else active_theme.overlay0;
+        // Button background: slight highlight
+        renderer.fillRect(term_btn_x, bar_y + 1, (term_text_len + btn_pad * 2) * cell_w, bar_h -| 2, term_bg);
+        bcol += btn_pad;
+        for (term_text) |ch| {
+            if (bcol >= self.visible_cols) break;
+            drawStatusChar(self, renderer, font, ch, bcol, text_y, term_fg);
+            bcol += 1;
+        }
+        bcol += btn_pad;
+        const term_btn_w = (xo + bcol * cell_w) - term_btn_x;
+        self.status_btn_terminal_x = term_btn_x;
+        self.status_btn_terminal_w = term_btn_w;
+
+        // Gap between buttons
+        bcol += 1;
+
+        // -- Diagnostics button with subtle background --
+        const diag_btn_x = xo + bcol * cell_w;
+        const diag_bg = if (diag_count > 0) active_theme.surface1 else active_theme.surface0;
+        const diag_fg = if (diag_count > 0) active_theme.peach else active_theme.overlay0;
+        renderer.fillRect(diag_btn_x, bar_y + 1, (diag_text_len + btn_pad * 2) * cell_w, bar_h -| 2, diag_bg);
+        bcol += btn_pad;
+        for (diag_text) |ch| {
+            if (bcol >= self.visible_cols) break;
+            drawStatusChar(self, renderer, font, ch, bcol, text_y, diag_fg);
+            bcol += 1;
+        }
+        bcol += btn_pad;
+        const diag_btn_w = (xo + bcol * cell_w) - diag_btn_x;
+        self.status_btn_diag_x = diag_btn_x;
+        self.status_btn_diag_w = diag_btn_w;
+
+        // Gap between buttons
+        bcol += 1;
+
+        // -- Settings gear button --
+        const gear_btn_x = xo + bcol * cell_w;
+        renderer.fillRect(gear_btn_x, bar_y + 1, (gear_text_len + btn_pad * 2) * cell_w, bar_h -| 2, active_theme.surface0);
+        bcol += btn_pad;
+        for (gear_text) |ch| {
+            if (bcol >= self.visible_cols) break;
+            drawStatusChar(self, renderer, font, ch, bcol, text_y, active_theme.overlay0);
+            bcol += 1;
+        }
+        bcol += btn_pad;
+        const gear_btn_w = (xo + bcol * cell_w) - gear_btn_x;
+        self.status_btn_gear_x = gear_btn_x;
+        self.status_btn_gear_w = gear_btn_w;
+    } else {
+        // No room for buttons — clear hit-boxes
+        self.status_btn_terminal_x = 0;
+        self.status_btn_terminal_w = 0;
+        self.status_btn_diag_x = 0;
+        self.status_btn_diag_w = 0;
+        self.status_btn_gear_x = 0;
+        self.status_btn_gear_w = 0;
+    }
+
+    // -- Right section text --
     for (right_str, 0..) |ch, i| {
         const rcol = right_start + @as(u32, @intCast(i));
         if (rcol >= self.visible_cols) break;
