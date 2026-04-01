@@ -397,6 +397,11 @@ const TermGrid = struct {
     is_alt_screen: bool = false,
     // Insert mode
     insert_mode: bool = false,
+    // Mouse tracking modes
+    mouse_tracking: bool = false, // DECSET 1000 (button events)
+    mouse_motion_tracking: bool = false, // DECSET 1002 (button+motion)
+    mouse_any_tracking: bool = false, // DECSET 1003 (all motion)
+    mouse_sgr_mode: bool = false, // DECSET 1006 (SGR extended mouse)
 
     fn init(allocator: Allocator, cols: u32, rows: u32) !TermGrid {
         const total = @as(usize, cols) * @as(usize, rows);
@@ -772,11 +777,11 @@ const TermGrid = struct {
 
 // ── Action Executor ────────────────────────────────────────────────
 
-fn executeAction(action: VtParser.VtAction, grid: *TermGrid) void {
+fn executeAction(action: VtParser.VtAction, grid: *TermGrid, pty_fd: ?posix.fd_t) void {
     switch (action) {
         .print => |cp| grid.putChar(cp),
         .execute => |c| handleControl(c, grid),
-        .csi => |csi| handleCsi(csi, grid),
+        .csi => |csi| handleCsi(csi, grid, pty_fd),
         .esc => |esc| handleEsc(esc, grid),
         .osc => {},
         .none => {},
@@ -859,7 +864,7 @@ fn handleEsc(esc: VtParser.EscData, grid: *TermGrid) void {
     }
 }
 
-fn handleCsi(csi: VtParser.CsiData, grid: *TermGrid) void {
+fn handleCsi(csi: VtParser.CsiData, grid: *TermGrid, pty_fd: ?posix.fd_t) void {
     const p = csi.params;
     const pc = csi.param_count;
 
@@ -872,6 +877,10 @@ fn handleCsi(csi: VtParser.CsiData, grid: *TermGrid) void {
                         1 => grid.decckm = true, // DECCKM
                         7 => grid.decawm = true, // DECAWM
                         25 => grid.cursor_visible = true, // DECTCEM
+                        1000 => grid.mouse_tracking = true,
+                        1002 => grid.mouse_motion_tracking = true,
+                        1003 => grid.mouse_any_tracking = true,
+                        1006 => grid.mouse_sgr_mode = true,
                         1049 => grid.switchScreen(true), // Alt screen
                         2004 => grid.bracketed_paste = true,
                         else => {},
@@ -885,6 +894,10 @@ fn handleCsi(csi: VtParser.CsiData, grid: *TermGrid) void {
                         1 => grid.decckm = false,
                         7 => grid.decawm = false,
                         25 => grid.cursor_visible = false,
+                        1000 => grid.mouse_tracking = false,
+                        1002 => grid.mouse_motion_tracking = false,
+                        1003 => grid.mouse_any_tracking = false,
+                        1006 => grid.mouse_sgr_mode = false,
                         1049 => grid.switchScreen(false),
                         2004 => grid.bracketed_paste = false,
                         else => {},
@@ -1007,7 +1020,20 @@ fn handleCsi(csi: VtParser.CsiData, grid: *TermGrid) void {
             }
         },
         'm' => handleSgr(csi, grid), // SGR - Select Graphic Rendition
-        'n' => {}, // DSR - Device Status Report (ignore for now)
+        'n' => { // DSR - Device Status Report
+            if (pty_fd) |fd| {
+                const mode = if (pc > 0) p[0] else 0;
+                if (mode == 6) {
+                    // CPR - Cursor Position Report: ESC [ row ; col R
+                    var resp_buf: [32]u8 = undefined;
+                    const resp = std.fmt.bufPrint(&resp_buf, "\x1b[{d};{d}R", .{ grid.cursor_y + 1, grid.cursor_x + 1 }) catch return;
+                    _ = posix.write(fd, resp) catch {};
+                } else if (mode == 5) {
+                    // Status report: terminal OK
+                    _ = posix.write(fd, "\x1b[0n") catch {};
+                }
+            }
+        },
         'r' => { // DECSTBM - Set Scrolling Region
             const top = if (pc > 0 and p[0] > 0) p[0] - 1 else 0;
             const bot = if (pc > 1 and p[1] > 0) p[1] - 1 else grid.rows - 1;
@@ -1018,7 +1044,12 @@ fn handleCsi(csi: VtParser.CsiData, grid: *TermGrid) void {
             grid.wrap_next = false;
         },
         't' => {}, // Window manipulation (ignore)
-        'c' => {}, // DA - Device Attributes (ignore)
+        'c' => { // DA - Device Attributes
+            if (pty_fd) |fd| {
+                // Report as VT220
+                _ = posix.write(fd, "\x1b[?62;22c") catch {};
+            }
+        },
         else => {},
     }
 }
@@ -1302,7 +1333,7 @@ pub const Terminal = struct {
             // Feed through VT parser
             for (buf[0..n]) |byte| {
                 const action = self.parser.feed(byte);
-                executeAction(action, &self.grid);
+                executeAction(action, &self.grid, self.pty_fd);
             }
         }
     }
@@ -1390,6 +1421,63 @@ pub const Terminal = struct {
         } else {
             self.sendBytes(text);
         }
+    }
+
+    /// Whether the terminal wants motion events forwarded
+    pub fn wantsMotionEvents(self: *const Terminal) bool {
+        return self.grid.mouse_motion_tracking or self.grid.mouse_any_tracking;
+    }
+
+    /// Send mouse event to PTY in the appropriate encoding
+    pub fn handleMouseEvent(self: *Terminal, button: u8, col: u32, row: u32, pressed: bool, is_motion: bool) void {
+        if (!self.grid.mouse_tracking and !self.grid.mouse_motion_tracking and !self.grid.mouse_any_tracking) return;
+
+        // Don't send motion events unless tracking them
+        if (is_motion and !self.grid.mouse_motion_tracking and !self.grid.mouse_any_tracking) return;
+
+        if (self.grid.mouse_sgr_mode) {
+            // SGR mode: ESC [ < button ; col ; row M/m
+            var buf: [32]u8 = undefined;
+            const suffix: u8 = if (pressed) 'M' else 'm';
+            const len = std.fmt.bufPrint(&buf, "\x1b[<{d};{d};{d}{c}", .{ button, col + 1, row + 1, suffix }) catch return;
+            self.sendBytes(len);
+        } else {
+            // Normal mode: ESC [ M button+32 col+33 row+33 (legacy, limited to 223 cols/rows)
+            if (col > 222 or row > 222) return;
+            var buf: [6]u8 = undefined;
+            buf[0] = 0x1b;
+            buf[1] = '[';
+            buf[2] = 'M';
+            buf[3] = @intCast(button + 32);
+            buf[4] = @intCast(col + 33);
+            buf[5] = @intCast(row + 33);
+            self.sendBytes(&buf);
+        }
+    }
+
+    /// Handle scroll wheel in terminal
+    pub fn handleScroll(self: *Terminal, delta: i32, col: u32, row: u32) void {
+        if (!self.grid.mouse_tracking and !self.grid.mouse_motion_tracking and !self.grid.mouse_any_tracking) return;
+
+        // Scroll up = button 64, scroll down = button 65
+        const button: u8 = if (delta < 0) 64 else 65;
+        const abs_delta = if (delta < 0) @as(u32, @intCast(-delta)) else @as(u32, @intCast(delta));
+        for (0..abs_delta) |_| {
+            self.handleMouseEvent(button, col, row, true, false);
+        }
+    }
+
+    /// Convert pixel coordinates to terminal cell coordinates, returning null if out of bounds
+    pub fn pixelToCell(self: *const Terminal, px: i32, py: i32, font: *const FontFace) ?struct { col: u32, row: u32 } {
+        if (!self.visible) return null;
+        const base_y = self.y + 2; // account for separator
+        if (px < @as(i32, @intCast(self.x)) or py < @as(i32, @intCast(base_y))) return null;
+        const rx = @as(u32, @intCast(px)) -| self.x;
+        const ry = @as(u32, @intCast(py)) -| base_y;
+        const col = rx / font.cell_width;
+        const row = ry / font.cell_height;
+        if (col >= self.grid.cols or row >= self.grid.rows) return null;
+        return .{ .col = col, .row = row };
     }
 
     pub fn updateLayout(self: *Terminal, x: u32, y: u32, width: u32, height: u32, font: *const FontFace) void {

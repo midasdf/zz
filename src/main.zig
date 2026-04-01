@@ -318,18 +318,29 @@ pub fn main() !void {
                             .expose => markAllPanesDirty(&pane_mgr),
 
                             .scroll => |s| {
-                                if (!terminal.focused) {
+                                if (terminal.focused) {
+                                    // Forward scroll to terminal for mouse-aware apps
+                                    terminal.handleScroll(s.delta, 0, 0);
+                                } else {
                                     handleScroll(editor, s.delta);
                                 }
                             },
 
                             .mouse_press => |me| {
-                                if (me.button == .left) {
-                                    // Check if click is in terminal area
-                                    if (terminal.containsPoint(me.x, me.y)) {
-                                        terminal.focused = true;
-                                    } else {
-                                        terminal.focused = false;
+                                if (terminal.containsPoint(me.x, me.y)) {
+                                    terminal.focused = true;
+                                    // Forward mouse press to terminal if mouse tracking is on
+                                    if (terminal.pixelToCell(me.x, me.y, &font)) |cell| {
+                                        const button: u8 = switch (me.button) {
+                                            .left => 0,
+                                            .middle => 1,
+                                            .right => 2,
+                                            .none => 0,
+                                        };
+                                        terminal.handleMouseEvent(button, cell.col, cell.row, true, false);
+                                    }
+                                } else if (me.button == .left) {
+                                    terminal.focused = false;
                                     const sw = file_tree.sidebarWidth(&font);
                                     if (file_tree.visible and me.x >= 0 and me.x < @as(i32, @intCast(sw))) {
                                         // Click in file tree sidebar
@@ -364,14 +375,23 @@ pub fn main() !void {
                                         active.markAllDirty();
                                         resetCursorBlink(active);
                                     }
-                                    }
                                 } else if (me.button == .middle) {
                                     win.requestPrimary();
                                 }
                             },
 
                             .mouse_release => |me| {
-                                if (me.button == .left) {
+                                if (terminal.focused) {
+                                    if (terminal.pixelToCell(me.x, me.y, &font)) |cell| {
+                                        const button: u8 = switch (me.button) {
+                                            .left => 0,
+                                            .middle => 1,
+                                            .right => 2,
+                                            .none => 0,
+                                        };
+                                        terminal.handleMouseEvent(button, cell.col, cell.row, false, false);
+                                    }
+                                } else if (me.button == .left) {
                                     mouse_dragging = false;
                                     const active = pane_mgr.active_leaf;
                                     if (active.getSelectedText()) |text| {
@@ -381,7 +401,12 @@ pub fn main() !void {
                             },
 
                             .mouse_motion => |me| {
-                                if (mouse_dragging) {
+                                if (terminal.focused and terminal.wantsMotionEvents()) {
+                                    if (terminal.pixelToCell(me.x, me.y, &font)) |cell| {
+                                        // button 32 = motion with no button held
+                                        terminal.handleMouseEvent(32, cell.col, cell.row, true, true);
+                                    }
+                                } else if (mouse_dragging) {
                                     const active = pane_mgr.active_leaf;
                                     const pos = active.pixelToPosition(me.x, me.y, &font);
                                     active.cursor.selectTo(pos);
