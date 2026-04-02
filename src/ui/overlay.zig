@@ -251,6 +251,7 @@ pub const Overlay = struct {
         font: *FontFace,
         state: *const ContextMenuState,
     ) void {
+        if (!state.active) return;
         const cell_w = font.cell_width;
         const cell_h = if (font.cell_height > 0) font.cell_height else 1;
         if (cell_w == 0) return;
