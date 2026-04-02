@@ -716,10 +716,10 @@ pub const FileTree = struct {
         };
 
         // Record expanded subdirectory paths before collapsing
-        var expanded_paths = std.ArrayList([]u8).init(self.allocator);
+        var expanded_paths: std.ArrayListUnmanaged([]u8) = .{};
         defer {
             for (expanded_paths.items) |p| self.allocator.free(p);
-            expanded_paths.deinit();
+            expanded_paths.deinit(self.allocator);
         }
 
         const parent_depth = self.entries.items[idx].depth;
@@ -729,7 +729,7 @@ pub const FileTree = struct {
             if (e.depth <= parent_depth) break;
             if (e.is_dir and e.is_expanded) {
                 const duped = try self.allocator.dupe(u8, e.path);
-                try expanded_paths.append(duped);
+                try expanded_paths.append(self.allocator, duped);
             }
             scan_i += 1;
         }
