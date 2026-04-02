@@ -68,6 +68,20 @@ const command_list = [_][]const u8{
     "Tab: Close All Tabs",
 };
 
+const context_menu_items = [_][]const u8{
+    "Cut",
+    "Copy",
+    "Paste",
+    "-",
+    "Select All",
+    "Select Word",
+    "-",
+    "Go to Definition",
+    "Find References",
+    "-",
+    "Command Palette...",
+};
+
 const font_path = "/usr/share/fonts/PlemolJP/PlemolJPConsoleNF-Regular.ttf";
 
 pub fn main() !void {
@@ -229,6 +243,36 @@ pub fn main() !void {
     var mouse_dragging = false;
     var minimap_dragging = false;
 
+    // Double/triple-click state
+    var last_click_time: i64 = 0;
+    var last_click_x: i32 = 0;
+    var last_click_y: i32 = 0;
+    var click_count: u32 = 0;
+    const double_click_ms: i64 = 400;
+    const click_distance: i32 = 5;
+
+    // Sidebar drag resize state
+    var sidebar_dragging = false;
+
+    // Scrollbar drag state
+    var scrollbar_dragging = false;
+
+    // Mouse position tracking (for scroll routing and hover)
+    var mouse_x: i32 = 0;
+    var mouse_y: i32 = 0;
+
+    // Hover tracking
+    var hover_tab: ?usize = null;
+
+    // Context menu state
+    var context_menu_active = false;
+    var context_menu_x: u32 = 0;
+    var context_menu_y: u32 = 0;
+    var context_menu_selected: usize = 0;
+
+    // Initialize cursors
+    win.initCursors();
+
     // Initial layout (account for sidebar + terminal)
     relayoutWithTerminal(&pane_mgr, &file_tree, &terminal, tab_bar_h, win.width, win.height, &font);
 
@@ -239,7 +283,7 @@ pub fn main() !void {
         editor.status_terminal_visible = terminal.visible;
         editor.status_diagnostic_count = @intCast(lsp_client.diagnostics.items.len);
         file_tree.active_path = if (editor.file_path) |p| p else null;
-        renderFrame(&tab_mgr, &pane_mgr, &win, &font, &overlay, &file_tree, &terminal, &lsp_client, completion_active, completion_selected, hover_active, signature_active);
+        renderFrame(&tab_mgr, &pane_mgr, &win, &font, &overlay, &file_tree, &terminal, &lsp_client, completion_active, completion_selected, hover_active, signature_active, hover_tab, context_menu_active, context_menu_x, context_menu_y, context_menu_selected);
     }
 
     while (running) {
@@ -255,6 +299,41 @@ pub fn main() !void {
                             .close => running = false,
 
                             .key_press => |ke| {
+                                if (context_menu_active) {
+                                    if (ke.keysym == window_mod.XK_Escape) {
+                                        context_menu_active = false;
+                                        editor.markAllDirty();
+                                        continue;
+                                    } else if (ke.keysym == window_mod.XK_Up) {
+                                        if (context_menu_selected > 0) context_menu_selected -= 1;
+                                        // Skip separators
+                                        while (context_menu_selected > 0 and context_menu_items[context_menu_selected].len == 1 and context_menu_items[context_menu_selected][0] == '-') {
+                                            context_menu_selected -= 1;
+                                        }
+                                        editor.markAllDirty();
+                                        continue;
+                                    } else if (ke.keysym == window_mod.XK_Down) {
+                                        if (context_menu_selected + 1 < context_menu_items.len) context_menu_selected += 1;
+                                        // Skip separators
+                                        while (context_menu_selected + 1 < context_menu_items.len and context_menu_items[context_menu_selected].len == 1 and context_menu_items[context_menu_selected][0] == '-') {
+                                            context_menu_selected += 1;
+                                        }
+                                        editor.markAllDirty();
+                                        continue;
+                                    } else if (ke.keysym == window_mod.XK_Return) {
+                                        const item = context_menu_items[context_menu_selected];
+                                        context_menu_active = false;
+                                        if (item.len > 1 or item[0] != '-') {
+                                            executeContextMenuItem(item, editor, &win, &lsp_client, &lsp_needs_sync, &mode, &overlay, &filtered_display, allocator, &file_list);
+                                        }
+                                        editor.markAllDirty();
+                                        continue;
+                                    } else {
+                                        context_menu_active = false;
+                                        editor.markAllDirty();
+                                        // Fall through to process key normally
+                                    }
+                                }
                                 if (hover_active) {
                                     // Any key dismisses hover tooltip
                                     hover_active = false;
@@ -490,12 +569,36 @@ pub fn main() !void {
 
                             .scroll => |s| {
                                 if (!terminal.focused) {
-                                    handleScroll(editor, s.delta);
+                                    // Route scroll to file tree sidebar if mouse is over it
+                                    const sw = file_tree.sidebarWidth(&font);
+                                    if (file_tree.visible and mouse_x >= 0 and mouse_x < @as(i32, @intCast(sw))) {
+                                        file_tree.handleScroll(s.delta);
+                                        markAllPanesDirty(&pane_mgr);
+                                    } else {
+                                        handleScroll(editor, s.delta);
+                                    }
                                 }
                                 // When terminal focused, X11 delivers scroll to child window
                             },
 
                             .mouse_press => |me| {
+                                // Dismiss or handle context menu
+                                if (context_menu_active and me.button == .left) {
+                                    context_menu_active = false;
+                                    // Check if click is inside context menu to execute action
+                                    const cell_h = font.cell_height;
+                                    if (cell_h > 0 and me.x >= @as(i32, @intCast(context_menu_x)) and me.y >= @as(i32, @intCast(context_menu_y + 4))) {
+                                        const row = @as(u32, @intCast(me.y - @as(i32, @intCast(context_menu_y + 4)))) / cell_h;
+                                        if (row < context_menu_items.len) {
+                                            const item = context_menu_items[row];
+                                            if (item.len > 1 or item[0] != '-') {
+                                                executeContextMenuItem(item, editor, &win, &lsp_client, &lsp_needs_sync, &mode, &overlay, &filtered_display, allocator, &file_list);
+                                            }
+                                        }
+                                    }
+                                    markAllPanesDirty(&pane_mgr);
+                                    continue;
+                                }
                                 if (terminal.containsPoint(me.x, me.y)) {
                                     // Click in terminal area: set X focus to child window
                                     terminal.setFocus();
@@ -504,7 +607,11 @@ pub fn main() !void {
                                         terminal.unfocus();
                                     }
                                     const sw = file_tree.sidebarWidth(&font);
-                                    if (file_tree.visible and me.x >= 0 and me.x < @as(i32, @intCast(sw))) {
+
+                                    // Check for sidebar border drag (resize)
+                                    if (file_tree.visible and me.x >= @as(i32, @intCast(sw)) - 3 and me.x <= @as(i32, @intCast(sw)) + 3) {
+                                        sidebar_dragging = true;
+                                    } else if (file_tree.visible and me.x >= 0 and me.x < @as(i32, @intCast(sw))) {
                                         // Click in file tree sidebar
                                         if (file_tree.handleClick(me.x, me.y, &font, tab_bar_h)) |path| {
                                             openFileInTab(&tab_mgr, allocator, path, &lsp_client, &font, &git_info);
@@ -534,37 +641,99 @@ pub fn main() !void {
                                             }
                                         }
                                         const active = pane_mgr.active_leaf;
-                                        // Check if click is in minimap
-                                        if (active.isInMinimap(me.x, me.y, win.width)) {
+                                        // Check if click is in scrollbar
+                                        if (active.isInScrollbar(me.x, me.y, &font)) {
+                                            active.handleScrollbarClick(me.y, &font);
+                                            scrollbar_dragging = true;
+                                        } else if (active.isInMinimap(me.x, me.y, win.width)) {
+                                            // Check if click is in minimap
                                             active.handleMinimapClick(me.y, &font);
                                             minimap_dragging = true;
                                         } else {
                                             const pos = active.pixelToPosition(me.x, me.y, &font);
-                                            active.cursor.moveTo(pos);
-                                            mouse_dragging = true;
-                                            active.markAllDirty();
+
+                                            // Double/triple-click detection
+                                            const now = std.time.milliTimestamp();
+                                            const dt = now - last_click_time;
+                                            const dx = if (me.x > last_click_x) me.x - last_click_x else last_click_x - me.x;
+                                            const dy = if (me.y > last_click_y) me.y - last_click_y else last_click_y - me.y;
+                                            const near = dx < click_distance and dy < click_distance;
+
+                                            if (dt < double_click_ms and near) {
+                                                click_count += 1;
+                                            } else {
+                                                click_count = 1;
+                                            }
+                                            last_click_time = now;
+                                            last_click_x = me.x;
+                                            last_click_y = me.y;
+
+                                            if (click_count == 3) {
+                                                // Triple-click: select entire line
+                                                active.selectLineAtPosition(pos);
+                                                click_count = 0; // reset
+                                            } else if (click_count == 2) {
+                                                // Double-click: select word
+                                                active.cursor.moveTo(pos);
+                                                active.selectWordAtPosition(pos);
+                                            } else {
+                                                // Single-click: move cursor
+                                                active.cursor.moveTo(pos);
+                                                mouse_dragging = true;
+                                                active.markAllDirty();
+                                            }
                                             resetCursorBlink(active);
                                         }
                                     }
                                 } else if (me.button == .middle) {
                                     win.requestPrimary();
+                                } else if (me.button == .right) {
+                                    // Right-click: show context menu
+                                    if (context_menu_active) {
+                                        context_menu_active = false;
+                                    } else {
+                                        context_menu_active = true;
+                                        context_menu_x = if (me.x >= 0) @intCast(me.x) else 0;
+                                        context_menu_y = if (me.y >= 0) @intCast(me.y) else 0;
+                                        context_menu_selected = 0;
+                                    }
+                                    markAllPanesDirty(&pane_mgr);
                                 }
                             },
 
                             .mouse_release => |me| {
                                 if (!terminal.focused and me.button == .left) {
-                                    mouse_dragging = false;
-                                    minimap_dragging = false;
-                                    const active = pane_mgr.active_leaf;
-                                    if (active.getSelectedText()) |text| {
-                                        win.setClipboard(text);
+                                    if (sidebar_dragging) {
+                                        sidebar_dragging = false;
+                                    } else if (scrollbar_dragging) {
+                                        scrollbar_dragging = false;
+                                    } else {
+                                        mouse_dragging = false;
+                                        minimap_dragging = false;
+                                        const active = pane_mgr.active_leaf;
+                                        if (active.getSelectedText()) |text| {
+                                            win.setClipboard(text);
+                                        }
                                     }
                                 }
                                 // When terminal focused, X11 delivers mouse events to child window
                             },
 
                             .mouse_motion => |me| {
-                                if (minimap_dragging) {
+                                mouse_x = me.x;
+                                mouse_y = me.y;
+
+                                if (sidebar_dragging) {
+                                    // Resize sidebar
+                                    const new_w = if (me.x > 50) @as(u32, @intCast(me.x)) else 50;
+                                    const max_w = win.width / 2;
+                                    file_tree.width = @min(new_w, max_w);
+                                    relayoutWithTerminal(&pane_mgr, &file_tree, &terminal, tab_bar_h, win.width, win.height, &font);
+                                    markAllPanesDirty(&pane_mgr);
+                                } else if (scrollbar_dragging) {
+                                    const active = pane_mgr.active_leaf;
+                                    active.handleScrollbarClick(me.y, &font);
+                                } else if (minimap_dragging) {
                                     const active = pane_mgr.active_leaf;
                                     active.handleMinimapClick(me.y, &font);
                                 } else if (mouse_dragging) {
@@ -572,6 +741,59 @@ pub fn main() !void {
                                     const pos = active.pixelToPosition(me.x, me.y, &font);
                                     active.cursor.selectTo(pos);
                                     active.markAllDirty();
+                                } else {
+                                    // Hover tracking and cursor shape changes
+                                    const sw = file_tree.sidebarWidth(&font);
+                                    var needs_redraw = false;
+
+                                    // Cursor shape based on position
+                                    if (file_tree.visible and me.x >= @as(i32, @intCast(sw)) - 3 and me.x <= @as(i32, @intCast(sw)) + 3) {
+                                        // Near sidebar border
+                                        win.setCursor(.resize_h);
+                                    } else if (file_tree.visible and me.x >= 0 and me.x < @as(i32, @intCast(sw))) {
+                                        // Over sidebar
+                                        win.setCursor(.arrow);
+                                    } else if (me.y >= 0 and me.y < @as(i32, @intCast(tab_bar_h))) {
+                                        // Over tab bar
+                                        win.setCursor(.arrow);
+                                    } else if (me.y >= 0 and @as(u32, @intCast(me.y)) >= editor.status_bar_y) {
+                                        // Over status bar
+                                        win.setCursor(.arrow);
+                                    } else {
+                                        // Over editor area
+                                        win.setCursor(.text);
+                                    }
+
+                                    // File tree hover
+                                    if (file_tree.handleMouseMotion(me.x, me.y, &font, tab_bar_h)) {
+                                        needs_redraw = true;
+                                    }
+
+                                    // Tab bar hover
+                                    const new_hover_tab = if (me.y >= 0 and me.y < @as(i32, @intCast(tab_bar_h)))
+                                        view_mod.tabAtPixel(&tab_mgr, me.x, &font, sw)
+                                    else
+                                        null;
+                                    if (new_hover_tab != hover_tab) {
+                                        hover_tab = new_hover_tab;
+                                        needs_redraw = true;
+                                    }
+
+                                    // Context menu hover
+                                    if (context_menu_active) {
+                                        const cell_h = font.cell_height;
+                                        if (cell_h > 0 and me.y >= @as(i32, @intCast(context_menu_y + 4))) {
+                                            const row = @as(u32, @intCast(me.y - @as(i32, @intCast(context_menu_y + 4)))) / cell_h;
+                                            if (row < context_menu_items.len) {
+                                                context_menu_selected = row;
+                                                needs_redraw = true;
+                                            }
+                                        }
+                                    }
+
+                                    if (needs_redraw) {
+                                        markAllPanesDirty(&pane_mgr);
+                                    }
                                 }
                                 // When terminal focused, X11 delivers motion to child window
                             },
@@ -748,7 +970,7 @@ pub fn main() !void {
             editor.lsp_diagnostics = lsp_client.diagnostics.items;
             editor.status_terminal_visible = terminal.visible;
             editor.status_diagnostic_count = @intCast(lsp_client.diagnostics.items.len);
-            renderFrame(&tab_mgr, &pane_mgr, &win, &font, &overlay, &file_tree, &terminal, &lsp_client, completion_active, completion_selected, hover_active, signature_active);
+            renderFrame(&tab_mgr, &pane_mgr, &win, &font, &overlay, &file_tree, &terminal, &lsp_client, completion_active, completion_selected, hover_active, signature_active, hover_tab, context_menu_active, context_menu_x, context_menu_y, context_menu_selected);
         }
     }
 }
@@ -909,6 +1131,38 @@ fn handleStatusBarClick(
     }
 
     return false;
+}
+
+fn executeContextMenuItem(
+    item: []const u8,
+    editor: *EditorView,
+    win: *Window,
+    lsp_client: *lsp.LspClient,
+    lsp_sync: *bool,
+    mode: *EditorMode,
+    overlay_ptr: *Overlay,
+    filtered_display: *std.ArrayList([]const u8),
+    allocator: std.mem.Allocator,
+    file_list: *?[][]const u8,
+) void {
+    if (std.mem.eql(u8, item, "Cut")) {
+        handleAction(editor, win, .cut, lsp_client, lsp_sync);
+    } else if (std.mem.eql(u8, item, "Copy")) {
+        handleAction(editor, win, .copy, lsp_client, lsp_sync);
+    } else if (std.mem.eql(u8, item, "Paste")) {
+        handleAction(editor, win, .paste, lsp_client, lsp_sync);
+    } else if (std.mem.eql(u8, item, "Select All")) {
+        handleAction(editor, win, .select_all, lsp_client, lsp_sync);
+    } else if (std.mem.eql(u8, item, "Select Word")) {
+        editor.selectWordAtPosition(editor.cursor.primary().head);
+    } else if (std.mem.eql(u8, item, "Go to Definition")) {
+        handleAction(editor, win, .goto_definition, lsp_client, lsp_sync);
+    } else if (std.mem.eql(u8, item, "Find References")) {
+        openGotoReferences(mode, overlay_ptr, editor, lsp_client, filtered_display, allocator);
+    } else if (std.mem.eql(u8, item, "Command Palette...")) {
+        openCommandPalette(mode, overlay_ptr, filtered_display, allocator);
+    }
+    _ = file_list;
 }
 
 fn markAllPanesDirty(pane_mgr: *PaneManager) void {
@@ -1325,6 +1579,11 @@ fn renderFrame(
     comp_selected: usize,
     show_hover: bool,
     show_signature: bool,
+    tab_hover: ?usize,
+    ctx_menu_active: bool,
+    ctx_menu_x: u32,
+    ctx_menu_y: u32,
+    ctx_menu_selected: usize,
 ) void {
     var renderer = Renderer{
         .buffer = win.getBuffer(),
@@ -1334,7 +1593,7 @@ fn renderFrame(
     };
     // Render tab bar first (offset by sidebar width)
     const sidebar_w = file_tree.sidebarWidth(font);
-    view_mod.renderTabBar(tab_mgr, &renderer, font, sidebar_w);
+    view_mod.renderTabBar(tab_mgr, &renderer, font, sidebar_w, tab_hover);
 
     if (pane_mgr.isSplit()) {
         // Render all pane leaves
@@ -1395,6 +1654,11 @@ fn renderFrame(
             const active_ed = pane_mgr.active_leaf;
             popups.renderSignatureHelp(&renderer, font, sig, active_ed);
         }
+    }
+
+    // Context menu
+    if (ctx_menu_active) {
+        Overlay.renderContextMenu(&renderer, font, ctx_menu_x, ctx_menu_y, &context_menu_items, ctx_menu_selected);
     }
 
     // IME cursor position updated separately via updateImeCursorPosition()

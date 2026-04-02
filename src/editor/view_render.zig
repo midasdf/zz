@@ -1123,6 +1123,7 @@ pub fn renderTabBar(
     renderer: *Renderer,
     font: *FontFace,
     x_start: u32,
+    hover_tab: ?usize,
 ) void {
     const active_theme = view_mod.getActiveTheme();
     const cell_w = font.cell_width;
@@ -1141,8 +1142,9 @@ pub fn renderTabBar(
     var x: u32 = x_start + 4;
     for (tab_mgr.tabs.items, 0..) |tab, i| {
         const is_active = (i == tab_mgr.active);
-        const bg = if (is_active) active_theme.base else active_theme.mantle;
-        const fg = if (is_active) active_theme.text else active_theme.overlay0;
+        const is_hovered = if (hover_tab) |ht| ht == i else false;
+        const bg = if (is_active) active_theme.base else if (is_hovered) active_theme.surface0 else active_theme.mantle;
+        const fg = if (is_active) active_theme.text else if (is_hovered) active_theme.subtext0 else active_theme.overlay0;
 
         // Tab label
         const label = if (tab.file_path) |p| basename(p) else "[untitled]";
@@ -1181,10 +1183,10 @@ pub fn renderTabBar(
             } else |_| {}
         }
 
-        // Close button "×" — right side of tab
+        // Close button "×" — right side of tab (brighter on hover)
         {
             const close_x = x + tab_w - close_btn_w;
-            const close_fg = if (is_active) active_theme.overlay0 else active_theme.surface2;
+            const close_fg = if (is_active or is_hovered) active_theme.overlay0 else active_theme.surface2;
             if (font.getGlyph('x')) |glyph| {
                 const gx: i32 = @intCast(close_x + cell_w / 4);
                 const gy: i32 = @as(i32, @intCast(text_y)) + font.ascent - @as(i32, glyph.bearing_y);
@@ -1194,6 +1196,28 @@ pub fn renderTabBar(
 
         x += tab_w + 1; // 1px gap between tabs
     }
+}
+
+/// Determine which tab index is at pixel position (click_x), or null.
+pub fn tabAtPixel(tab_mgr: *const TabManager, click_x: i32, font: *const FontFace, x_start: u32) ?usize {
+    const cell_w = font.cell_width;
+    if (cell_w == 0) return null;
+
+    var x: u32 = x_start + 4;
+    for (tab_mgr.tabs.items, 0..) |tab, i| {
+        const label = if (tab.file_path) |p| basename(p) else "[untitled]";
+        const label_len: u32 = @intCast(label.len);
+        const mod_extra: u32 = if (tab.modified) 2 else 0;
+        const close_btn_w: u32 = cell_w + cell_w / 2;
+        const tab_w = (label_len + mod_extra + 3) * cell_w + close_btn_w;
+
+        const tab_x: i32 = @intCast(x);
+        if (click_x >= tab_x and click_x < tab_x + @as(i32, @intCast(tab_w))) {
+            return i;
+        }
+        x += tab_w + 1;
+    }
+    return null;
 }
 
 // ═══════════════════════════════════════════════════════════════

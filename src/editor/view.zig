@@ -741,7 +741,11 @@ pub const EditorView = struct {
     }
 
     fn selectWordAtCursor(self: *EditorView) void {
-        const pos = self.cursor.primary().head;
+        self.selectWordAtPosition(self.cursor.primary().head);
+    }
+
+    /// Select the word at a given byte offset (used by double-click).
+    pub fn selectWordAtPosition(self: *EditorView, pos: u32) void {
         var start = pos;
         while (start > 0) {
             const slice = self.buffer.contiguousSliceAt(start - 1);
@@ -760,6 +764,18 @@ pub const EditorView = struct {
             self.cursor.cursors.items[0] = .{ .anchor = start, .head = end_pos };
             self.markAllDirty();
         }
+    }
+
+    /// Select the entire line at a given byte offset (used by triple-click).
+    pub fn selectLineAtPosition(self: *EditorView, pos: u32) void {
+        const lc = self.buffer.offsetToLineCol(pos);
+        const line_start = self.buffer.lineToOffset(lc.line);
+        const next_line = if (lc.line + 1 < self.buffer.lineCount())
+            self.buffer.lineToOffset(lc.line + 1)
+        else
+            self.buffer.total_len;
+        self.cursor.cursors.items[0] = .{ .anchor = line_start, .head = next_line };
+        self.markAllDirty();
     }
 
     fn hasCursorAt(self: *const EditorView, anchor: u32, head: u32) bool {
@@ -890,6 +906,46 @@ pub const EditorView = struct {
         }
 
         return offset;
+    }
+
+    /// Check if a pixel coordinate is within the scrollbar track area.
+    pub fn isInScrollbar(self: *const EditorView, px: i32, py: i32, font: *const FontFace) bool {
+        const cell_h = font.cell_height;
+        if (cell_h == 0) return false;
+        const total_lines = self.buffer.lineCount();
+        if (total_lines <= self.visible_rows) return false;
+
+        const pw = self.paneWidth(0);
+        const mm_offset: u32 = if (self.minimap_visible) self.minimap_width else 0;
+        if (pw <= mm_offset + 8) return false;
+        const bar_x = self.x_offset + pw - mm_offset - 8;
+        const bar_y = self.y_offset;
+        const bar_h = self.visible_rows * cell_h;
+        const bar_w: u32 = 6;
+
+        return px >= @as(i32, @intCast(bar_x)) and
+            px < @as(i32, @intCast(bar_x + bar_w + 4)) and // extra 4px click target
+            py >= @as(i32, @intCast(bar_y)) and
+            py < @as(i32, @intCast(bar_y + bar_h));
+    }
+
+    /// Handle a scrollbar click/drag: convert pixel Y to scroll_line.
+    pub fn handleScrollbarClick(self: *EditorView, py: i32, font: *const FontFace) void {
+        const cell_h = font.cell_height;
+        if (cell_h == 0) return;
+        const total_lines = self.buffer.lineCount();
+        if (total_lines <= self.visible_rows) return;
+
+        const bar_y = self.y_offset;
+        const bar_h = self.visible_rows * cell_h;
+        if (bar_h == 0) return;
+
+        const rel_y: f32 = @floatFromInt(@max(py - @as(i32, @intCast(bar_y)), 0));
+        const bar_h_f: f32 = @floatFromInt(bar_h);
+        const ratio = @min(rel_y / bar_h_f, 1.0);
+        const max_scroll = total_lines -| self.visible_rows;
+        self.scroll_line = @intFromFloat(ratio * @as(f32, @floatFromInt(max_scroll)));
+        self.markAllDirty();
     }
 
     // ── Internal helpers ───────────────────────────────────────────
@@ -1951,6 +2007,7 @@ pub const EditorView = struct {
 const view_render_mod = @import("view_render.zig");
 pub const tabBarHeight = view_render_mod.tabBarHeight;
 pub const renderTabBar = view_render_mod.renderTabBar;
+pub const tabAtPixel = view_render_mod.tabAtPixel;
 
 pub fn isWordChar(c: u8) bool {
     return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or c == '_';
