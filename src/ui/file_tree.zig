@@ -17,6 +17,7 @@ const theme = struct {
     const subtext0 = Color.fromHex(0xa6adc8);
     const lavender = Color.fromHex(0xb4befe);
     const green = Color.fromHex(0xa6e3a1);
+    const rosewater = Color.fromHex(0xf5e0dc);
 };
 
 pub const FileTree = struct {
@@ -29,6 +30,7 @@ pub const FileTree = struct {
     root_path: []const u8,
     active_path: ?[]const u8, // Currently open file (for highlighting)
     hover_entry: ?usize = null, // Entry under mouse cursor (for hover highlight)
+    inline_input: ?InlineInput = null,
 
     pub const Entry = struct {
         name: []u8,
@@ -37,6 +39,97 @@ pub const FileTree = struct {
         is_dir: bool,
         is_expanded: bool,
         has_children: bool,
+    };
+
+    pub const InlineInput = struct {
+        buffer: [256]u8 = undefined,
+        len: usize = 0,
+        cursor_pos: usize = 0, // byte offset, always at codepoint boundary
+        mode: enum { new_file, new_folder, rename_file } = .new_file,
+        target_dir: []const u8 = "",
+        insert_at: usize = 0,
+        original_name: ?[]const u8 = null,
+
+        pub fn setText(self: *InlineInput, text: []const u8) void {
+            const n = @min(text.len, self.buffer.len);
+            @memcpy(self.buffer[0..n], text[0..n]);
+            self.len = n;
+            self.cursor_pos = n;
+        }
+
+        pub fn insertChar(self: *InlineInput, codepoint: u21) void {
+            var seq: [4]u8 = undefined;
+            const seq_len = std.unicode.utf8Encode(codepoint, &seq) catch return;
+            if (self.len + seq_len > self.buffer.len) return;
+            // Shift bytes right from cursor_pos
+            std.mem.copyBackwards(
+                u8,
+                self.buffer[self.cursor_pos + seq_len .. self.len + seq_len],
+                self.buffer[self.cursor_pos .. self.len],
+            );
+            @memcpy(self.buffer[self.cursor_pos .. self.cursor_pos + seq_len], seq[0..seq_len]);
+            self.len += seq_len;
+            self.cursor_pos += seq_len;
+        }
+
+        pub fn backspace(self: *InlineInput) void {
+            if (self.cursor_pos == 0) return;
+            // Walk backwards over continuation bytes
+            var pos = self.cursor_pos - 1;
+            while (pos > 0 and (self.buffer[pos] & 0xC0) == 0x80) {
+                pos -= 1;
+            }
+            const seq_len = self.cursor_pos - pos;
+            std.mem.copyForwards(
+                u8,
+                self.buffer[pos .. self.len - seq_len],
+                self.buffer[self.cursor_pos .. self.len],
+            );
+            self.len -= seq_len;
+            self.cursor_pos = pos;
+        }
+
+        pub fn delete(self: *InlineInput) void {
+            if (self.cursor_pos >= self.len) return;
+            const seq_len = std.unicode.utf8ByteSequenceLength(self.buffer[self.cursor_pos]) catch 1;
+            const actual_len = @min(seq_len, self.len - self.cursor_pos);
+            std.mem.copyForwards(
+                u8,
+                self.buffer[self.cursor_pos .. self.len - actual_len],
+                self.buffer[self.cursor_pos + actual_len .. self.len],
+            );
+            self.len -= actual_len;
+        }
+
+        pub fn moveLeft(self: *InlineInput) void {
+            if (self.cursor_pos == 0) return;
+            var pos = self.cursor_pos - 1;
+            while (pos > 0 and (self.buffer[pos] & 0xC0) == 0x80) {
+                pos -= 1;
+            }
+            self.cursor_pos = pos;
+        }
+
+        pub fn moveRight(self: *InlineInput) void {
+            if (self.cursor_pos >= self.len) return;
+            const seq_len = std.unicode.utf8ByteSequenceLength(self.buffer[self.cursor_pos]) catch 1;
+            self.cursor_pos += @min(seq_len, self.len - self.cursor_pos);
+        }
+
+        pub fn content(self: *const InlineInput) []const u8 {
+            return self.buffer[0..self.len];
+        }
+
+        /// Returns null if valid, or an error message string if invalid.
+        pub fn validate(self: *const InlineInput) ?[]const u8 {
+            if (self.len == 0) return "Name cannot be empty";
+            const text = self.buffer[0..self.len];
+            for (text) |byte| {
+                if (byte == '/') return "Name cannot contain '/'";
+                if (byte == 0) return "Name cannot contain null bytes";
+            }
+            return null;
+        }
     };
 
     const skip_dirs = [_][]const u8{
@@ -528,5 +621,169 @@ pub const FileTree = struct {
         const entry = self.entries.items[self.selected];
         if (entry.is_dir) return null;
         return entry.path;
+    }
+
+    pub fn renderInlineInput(self: *FileTree, renderer: *Renderer, font: *FontFace, tab_bar_h: u32) void {
+        const input = self.inline_input orelse return;
+        if (!self.visible) return;
+
+        const cell_w = font.cell_width;
+        const cell_h = font.cell_height;
+        if (cell_w == 0 or cell_h == 0) return;
+
+        const sw = self.sidebarWidth(font);
+        const top_pad: u32 = 4;
+        const content_y = tab_bar_h + top_pad;
+
+        // Row position for the inline input
+        const row = if (input.insert_at >= self.scroll_offset)
+            input.insert_at - self.scroll_offset
+        else
+            return;
+
+        const max_rows = blk: {
+            const area_h = if (renderer.height > tab_bar_h) renderer.height - tab_bar_h else 0;
+            const content_h = if (area_h > top_pad) area_h - top_pad else 0;
+            break :blk if (cell_h > 0) content_h / cell_h else 0;
+        };
+        if (row >= max_rows) return;
+
+        const row_y = content_y + @as(u32, @intCast(row)) * cell_h;
+
+        // Compute indent based on depth at insert_at (child of that entry)
+        const indent_px: u32 = 16;
+        const depth: u32 = blk: {
+            if (input.insert_at < self.entries.items.len) {
+                // Insert is inside a directory — child depth = parent depth + 1
+                break :blk @as(u32, self.entries.items[input.insert_at].depth) + 1;
+            }
+            break :blk 0;
+        };
+        const indent: u32 = depth * indent_px;
+        const text_x: u32 = 8 + indent + cell_w + 2; // match file text start
+
+        // Background highlight
+        renderer.fillRect(0, row_y, sw - 1, cell_h, theme.surface1);
+
+        // Draw text content
+        const text = input.content();
+        var draw_x: u32 = text_x;
+        var byte_offset: usize = 0;
+        var cursor_x: u32 = text_x; // default cursor at start
+
+        // Draw characters, tracking byte offset to find cursor x
+        var i: usize = 0;
+        while (i < text.len) {
+            // Update cursor_x if we've reached cursor_pos in bytes
+            if (byte_offset == input.cursor_pos) {
+                cursor_x = draw_x;
+            }
+            const seq_len = std.unicode.utf8ByteSequenceLength(text[i]) catch 1;
+            const actual_seq_len = @min(seq_len, text.len - i);
+            const codepoint: u21 = std.unicode.utf8Decode(text[i .. i + actual_seq_len]) catch @as(u21, text[i]);
+            if (font.getGlyph(codepoint)) |glyph| {
+                const gx = @as(i32, @intCast(draw_x)) + glyph.bearing_x;
+                const gy = @as(i32, @intCast(row_y)) + font.ascent - glyph.bearing_y;
+                renderer.drawGlyph(glyph, gx, gy, theme.text);
+            } else |_| {}
+            draw_x += cell_w;
+            byte_offset += actual_seq_len;
+            i += actual_seq_len;
+        }
+        // If cursor is at end of text
+        if (byte_offset == input.cursor_pos) {
+            cursor_x = draw_x;
+        }
+
+        // Draw 2px beam cursor in rosewater
+        const cursor_draw_y = row_y;
+        renderer.fillRect(cursor_x, cursor_draw_y, 2, cell_h, theme.rosewater);
+    }
+
+    pub fn refreshDirectory(self: *FileTree, dir_path: []const u8) !void {
+        // Find the directory entry by path
+        var found_idx: ?usize = null;
+        for (self.entries.items, 0..) |entry, idx| {
+            if (entry.is_dir and std.mem.eql(u8, entry.path, dir_path)) {
+                found_idx = idx;
+                break;
+            }
+        }
+
+        const idx = found_idx orelse {
+            // Fallback: full repopulate
+            return self.populate();
+        };
+
+        // Record expanded subdirectory paths before collapsing
+        var expanded_paths = std.ArrayList([]u8).init(self.allocator);
+        defer {
+            for (expanded_paths.items) |p| self.allocator.free(p);
+            expanded_paths.deinit();
+        }
+
+        const parent_depth = self.entries.items[idx].depth;
+        var scan_i = idx + 1;
+        while (scan_i < self.entries.items.len) {
+            const e = self.entries.items[scan_i];
+            if (e.depth <= parent_depth) break;
+            if (e.is_dir and e.is_expanded) {
+                const duped = try self.allocator.dupe(u8, e.path);
+                try expanded_paths.append(duped);
+            }
+            scan_i += 1;
+        }
+
+        // Collapse then expand
+        self.collapseAt(idx);
+        try self.expandAt(idx);
+
+        // Re-expand previously expanded subdirectories
+        for (expanded_paths.items) |ep| {
+            for (self.entries.items, 0..) |entry, ei| {
+                if (entry.is_dir and !entry.is_expanded and std.mem.eql(u8, entry.path, ep)) {
+                    try self.expandAt(ei);
+                    break;
+                }
+            }
+        }
+    }
+
+    pub fn createNewFile(self: *FileTree, dir_path: []const u8, name: []const u8) !void {
+        const full_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ dir_path, name });
+        defer self.allocator.free(full_path);
+
+        const file = try std.fs.cwd().createFile(full_path, .{ .exclusive = true });
+        file.close();
+
+        try self.refreshDirectory(dir_path);
+    }
+
+    pub fn createNewFolder(self: *FileTree, dir_path: []const u8, name: []const u8) !void {
+        const full_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ dir_path, name });
+        defer self.allocator.free(full_path);
+
+        try std.fs.cwd().makeDir(full_path);
+        try self.refreshDirectory(dir_path);
+    }
+
+    pub fn renameEntry(self: *FileTree, old_path: []const u8, new_name: []const u8) !void {
+        // Determine parent directory
+        const parent = std.fs.path.dirname(old_path) orelse ".";
+        const new_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ parent, new_name });
+        defer self.allocator.free(new_path);
+
+        try std.fs.cwd().rename(old_path, new_path);
+        try self.refreshDirectory(parent);
+    }
+
+    pub fn deleteEntry(self: *FileTree, path: []const u8, is_dir: bool) !void {
+        if (is_dir) {
+            try std.fs.cwd().deleteTree(path);
+        } else {
+            try std.fs.cwd().deleteFile(path);
+        }
+        const parent = std.fs.path.dirname(path) orelse ".";
+        try self.refreshDirectory(parent);
     }
 };
