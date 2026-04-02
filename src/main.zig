@@ -276,6 +276,12 @@ pub fn main() !void {
     // Context menu state
     var ctx_menu = Overlay.ContextMenuState{ .items = &editor_menu_items, .selected = 0, .x = 0, .y = 0, .source = .editor, .tree_entry_index = null, .active = false };
 
+    // Confirm dialog + inline input state
+    var confirm_dialog = Overlay.ConfirmDialogState{ .message = "", .selected_yes = false, .active = false, .target_path = "", .target_is_dir = false };
+    var confirm_msg_buf: [256]u8 = undefined;
+    var status_message: ?[]const u8 = null;
+    var status_message_time: i64 = 0;
+
     // Initialize cursors
     win.initCursors();
 
@@ -289,7 +295,7 @@ pub fn main() !void {
         editor.status_terminal_visible = terminal.visible;
         editor.status_diagnostic_count = @intCast(lsp_client.diagnostics.items.len);
         file_tree.active_path = if (editor.file_path) |p| p else null;
-        renderFrame(&tab_mgr, &pane_mgr, &win, &font, &overlay, &file_tree, &terminal, &lsp_client, completion_active, completion_selected, hover_active, signature_active, hover_tab, &ctx_menu);
+        renderFrame(&tab_mgr, &pane_mgr, &win, &font, &overlay, &file_tree, &terminal, &lsp_client, completion_active, completion_selected, hover_active, signature_active, hover_tab, &ctx_menu, &confirm_dialog, status_message, status_message_time);
     }
 
     while (running) {
@@ -321,7 +327,7 @@ pub fn main() !void {
                                     } else if (ke.keysym == window_mod.XK_Return) {
                                         if (ctx_menu.selectedAction()) |action| {
                                             ctx_menu.close();
-                                            executeMenuAction(action, editor, &win, &lsp_client, &lsp_needs_sync, &mode, &overlay, &filtered_display, allocator, &file_tree);
+                                            executeMenuAction(action, editor, &win, &lsp_client, &lsp_needs_sync, &mode, &overlay, &filtered_display, allocator, &file_tree, &ctx_menu, &confirm_dialog, &confirm_msg_buf);
                                         } else {
                                             ctx_menu.close();
                                         }
@@ -376,6 +382,127 @@ pub fn main() !void {
                                         completion_active = false;
                                         editor.markAllDirty();
                                     }
+                                }
+                                if (mode == .tree_input) {
+                                    if (ke.keysym == window_mod.XK_Escape) {
+                                        file_tree.inline_input = null;
+                                        mode = .normal;
+                                    } else if (ke.keysym == window_mod.XK_Return) {
+                                        if (file_tree.inline_input) |*input| {
+                                            if (input.validate()) |err_msg| {
+                                                status_message = err_msg;
+                                                status_message_time = std.time.milliTimestamp();
+                                            } else {
+                                                const name = input.content();
+                                                switch (input.mode) {
+                                                    .new_file => {
+                                                        file_tree.createNewFile(input.target_dir, name) catch |err| {
+                                                            status_message = @errorName(err);
+                                                            status_message_time = std.time.milliTimestamp();
+                                                            markAllPanesDirty(&pane_mgr);
+                                                            continue;
+                                                        };
+                                                        var open_buf: [std.fs.max_path_bytes]u8 = undefined;
+                                                        if (std.fmt.bufPrint(&open_buf, "{s}/{s}", .{ input.target_dir, name })) |open_path| {
+                                                            openFileInTab(&tab_mgr, allocator, open_path, &lsp_client, &font, &git_info);
+                                                            syncPaneToActiveTab(&pane_mgr, &tab_mgr);
+                                                            file_tree.active_path = pane_mgr.active_leaf.file_path;
+                                                        } else |_| {}
+                                                    },
+                                                    .new_folder => {
+                                                        file_tree.createNewFolder(input.target_dir, name) catch |err| {
+                                                            status_message = @errorName(err);
+                                                            status_message_time = std.time.milliTimestamp();
+                                                        };
+                                                    },
+                                                    .rename_file => {
+                                                        if (input.original_name) |_| {
+                                                            const idx = input.insert_at;
+                                                            if (idx < file_tree.entries.items.len) {
+                                                                const entry = &file_tree.entries.items[idx];
+                                                                const old_path_dupe = allocator.dupe(u8, entry.path) catch {
+                                                                    markAllPanesDirty(&pane_mgr);
+                                                                    continue;
+                                                                };
+                                                                defer allocator.free(old_path_dupe);
+                                                                const had_tab = tab_mgr.findByPath(old_path_dupe) != null;
+                                                                file_tree.renameEntry(old_path_dupe, name) catch |err| {
+                                                                    status_message = @errorName(err);
+                                                                    status_message_time = std.time.milliTimestamp();
+                                                                    markAllPanesDirty(&pane_mgr);
+                                                                    continue;
+                                                                };
+                                                                if (had_tab) {
+                                                                    if (tab_mgr.findByPath(old_path_dupe)) |old_idx| {
+                                                                        tab_mgr.closeTab(old_idx);
+                                                                    }
+                                                                    const parent = std.fs.path.dirname(old_path_dupe) orelse ".";
+                                                                    var new_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+                                                                    if (std.fmt.bufPrint(&new_path_buf, "{s}/{s}", .{ parent, name })) |new_path| {
+                                                                        if (lsp_client.process != null) {
+                                                                            var uri_buf: [std.fs.max_path_bytes + 8]u8 = undefined;
+                                                                            if (std.fmt.bufPrint(&uri_buf, "file://{s}", .{old_path_dupe})) |old_uri| {
+                                                                                lsp_client.didClose(old_uri);
+                                                                            } else |_| {}
+                                                                        }
+                                                                        openFileInTab(&tab_mgr, allocator, new_path, &lsp_client, &font, &git_info);
+                                                                        syncPaneToActiveTab(&pane_mgr, &tab_mgr);
+                                                                        file_tree.active_path = pane_mgr.active_leaf.file_path;
+                                                                    } else |_| {}
+                                                                }
+                                                            }
+                                                        }
+                                                    },
+                                                }
+                                                file_tree.inline_input = null;
+                                                mode = .normal;
+                                            }
+                                        }
+                                    } else if (ke.keysym == window_mod.XK_BackSpace) {
+                                        if (file_tree.inline_input) |*input| input.backspace();
+                                    } else if (ke.keysym == window_mod.XK_Delete) {
+                                        if (file_tree.inline_input) |*input| input.delete();
+                                    } else if (ke.keysym == window_mod.XK_Left) {
+                                        if (file_tree.inline_input) |*input| input.moveLeft();
+                                    } else if (ke.keysym == window_mod.XK_Right) {
+                                        if (file_tree.inline_input) |*input| input.moveRight();
+                                    } else if (ke.keysym == window_mod.XK_Home) {
+                                        if (file_tree.inline_input) |*input| input.cursor_pos = 0;
+                                    } else if (ke.keysym == window_mod.XK_End) {
+                                        if (file_tree.inline_input) |*input| input.cursor_pos = input.len;
+                                    }
+                                    markAllPanesDirty(&pane_mgr);
+                                    continue;
+                                }
+                                if (mode == .confirm_dialog) {
+                                    if (ke.keysym == window_mod.XK_Escape or ke.keysym == 0x006e) { // Escape or 'n'
+                                        confirm_dialog.active = false;
+                                        mode = .normal;
+                                    } else if (ke.keysym == 0x0079) { // 'y'
+                                        file_tree.deleteEntry(confirm_dialog.target_path, confirm_dialog.target_is_dir) catch |err| {
+                                            status_message = @errorName(err);
+                                            status_message_time = std.time.milliTimestamp();
+                                        };
+                                        closeTabsForPath(&tab_mgr, confirm_dialog.target_path, confirm_dialog.target_is_dir);
+                                        syncPaneToActiveTab(&pane_mgr, &tab_mgr);
+                                        confirm_dialog.active = false;
+                                        mode = .normal;
+                                    } else if (ke.keysym == window_mod.XK_Return) {
+                                        if (confirm_dialog.selected_yes) {
+                                            file_tree.deleteEntry(confirm_dialog.target_path, confirm_dialog.target_is_dir) catch |err| {
+                                                status_message = @errorName(err);
+                                                status_message_time = std.time.milliTimestamp();
+                                            };
+                                            closeTabsForPath(&tab_mgr, confirm_dialog.target_path, confirm_dialog.target_is_dir);
+                                            syncPaneToActiveTab(&pane_mgr, &tab_mgr);
+                                        }
+                                        confirm_dialog.active = false;
+                                        mode = .normal;
+                                    } else if (ke.keysym == window_mod.XK_Tab or ke.keysym == window_mod.XK_Left or ke.keysym == window_mod.XK_Right) {
+                                        confirm_dialog.selected_yes = !confirm_dialog.selected_yes;
+                                    }
+                                    markAllPanesDirty(&pane_mgr);
+                                    continue;
                                 }
                                 if (mode != .normal) {
                                     handleOverlayKey(&mode, &overlay, &tab_mgr, &pane_mgr, ke, allocator, &file_list, &filtered_display, &search_results, &lsp_client, &font, &git_info, &replace_buf, &replace_len, &replace_field_active, &lsp_needs_sync);
@@ -498,6 +625,24 @@ pub fn main() !void {
                             },
 
                             .text_input => |te| {
+                                if (mode == .tree_input) {
+                                    if (file_tree.inline_input) |*input| {
+                                        const bytes = te.slice();
+                                        var i: usize = 0;
+                                        while (i < bytes.len) {
+                                            const seq_len = std.unicode.utf8ByteSequenceLength(bytes[i]) catch 1;
+                                            const actual = @min(seq_len, bytes.len - i);
+                                            const cp = std.unicode.utf8Decode(bytes[i .. i + actual]) catch @as(u21, bytes[i]);
+                                            input.insertChar(cp);
+                                            i += actual;
+                                        }
+                                    }
+                                    markAllPanesDirty(&pane_mgr);
+                                    continue;
+                                }
+                                if (mode == .confirm_dialog) {
+                                    continue; // consume, ignore
+                                }
                                 if (mode != .normal) {
                                     if (mode == .find_replace and replace_field_active) {
                                         // Append to replace buffer
@@ -592,7 +737,7 @@ pub fn main() !void {
                                         if (me.y >= my_base and me.y < my_base + items_h) {
                                             const row = @as(usize, @intCast(@as(u32, @intCast(me.y - my_base)) / cell_h));
                                             if (row < ctx_menu.items.len and ctx_menu.items[row].enabled) {
-                                                executeMenuAction(ctx_menu.items[row].action, editor, &win, &lsp_client, &lsp_needs_sync, &mode, &overlay, &filtered_display, allocator, &file_tree);
+                                                executeMenuAction(ctx_menu.items[row].action, editor, &win, &lsp_client, &lsp_needs_sync, &mode, &overlay, &filtered_display, allocator, &file_tree, &ctx_menu, &confirm_dialog, &confirm_msg_buf);
                                             }
                                         }
                                     }
@@ -1004,7 +1149,7 @@ pub fn main() !void {
             editor.lsp_diagnostics = lsp_client.diagnostics.items;
             editor.status_terminal_visible = terminal.visible;
             editor.status_diagnostic_count = @intCast(lsp_client.diagnostics.items.len);
-            renderFrame(&tab_mgr, &pane_mgr, &win, &font, &overlay, &file_tree, &terminal, &lsp_client, completion_active, completion_selected, hover_active, signature_active, hover_tab, &ctx_menu);
+            renderFrame(&tab_mgr, &pane_mgr, &win, &font, &overlay, &file_tree, &terminal, &lsp_client, completion_active, completion_selected, hover_active, signature_active, hover_tab, &ctx_menu, &confirm_dialog, status_message, status_message_time);
         }
     }
 }
@@ -1178,6 +1323,9 @@ fn executeMenuAction(
     filtered_display: *std.ArrayList([]const u8),
     allocator: std.mem.Allocator,
     file_tree: *FileTree,
+    ctx_menu_ptr: *Overlay.ContextMenuState,
+    confirm_dialog_ptr: *Overlay.ConfirmDialogState,
+    confirm_buf: *[256]u8,
 ) void {
     switch (action) {
         .ed_cut => handleAction(editor, win, .cut, lsp_client, lsp_sync),
@@ -1188,10 +1336,99 @@ fn executeMenuAction(
         .ed_goto_definition => handleAction(editor, win, .goto_definition, lsp_client, lsp_sync),
         .ed_find_references => openGotoReferences(mode, overlay_ptr, editor, lsp_client, filtered_display, allocator),
         .ed_command_palette => openCommandPalette(mode, overlay_ptr, filtered_display, allocator),
-        // File tree actions — will be fully wired in Task 5
-        .tree_new_file, .tree_new_folder, .tree_rename, .tree_delete, .tree_copy_path, .tree_copy_relative_path => {},
+        .tree_new_file => {
+            const idx = ctx_menu_ptr.tree_entry_index orelse return;
+            if (idx >= file_tree.entries.items.len) return;
+            const entry = &file_tree.entries.items[idx];
+            const target_dir = if (entry.is_dir) entry.path else std.fs.path.dirname(entry.path) orelse ".";
+            file_tree.inline_input = .{
+                .mode = .new_file,
+                .target_dir = target_dir,
+                .insert_at = idx,
+                .original_name = null,
+            };
+            mode.* = .tree_input;
+        },
+        .tree_new_folder => {
+            const idx = ctx_menu_ptr.tree_entry_index orelse return;
+            if (idx >= file_tree.entries.items.len) return;
+            const entry = &file_tree.entries.items[idx];
+            const target_dir = if (entry.is_dir) entry.path else std.fs.path.dirname(entry.path) orelse ".";
+            file_tree.inline_input = .{
+                .mode = .new_folder,
+                .target_dir = target_dir,
+                .insert_at = idx,
+                .original_name = null,
+            };
+            mode.* = .tree_input;
+        },
+        .tree_rename => {
+            const idx = ctx_menu_ptr.tree_entry_index orelse return;
+            if (idx >= file_tree.entries.items.len) return;
+            const entry = &file_tree.entries.items[idx];
+            // Guard against renaming root (depth 0 dir)
+            if (entry.depth == 0 and entry.is_dir) return;
+            var inp = FileTree.InlineInput{
+                .mode = .rename_file,
+                .target_dir = std.fs.path.dirname(entry.path) orelse ".",
+                .insert_at = idx,
+                .original_name = entry.name,
+            };
+            inp.setText(entry.name);
+            // Place cursor before extension for files (at last dot, skip dotfiles)
+            if (!entry.is_dir) {
+                const name = entry.name;
+                if (name.len > 0 and name[0] != '.') {
+                    if (std.mem.lastIndexOfScalar(u8, name, '.')) |dot_pos| {
+                        inp.cursor_pos = dot_pos;
+                    }
+                }
+            }
+            file_tree.inline_input = inp;
+            mode.* = .tree_input;
+        },
+        .tree_delete => {
+            const idx = ctx_menu_ptr.tree_entry_index orelse return;
+            if (idx >= file_tree.entries.items.len) return;
+            const entry = &file_tree.entries.items[idx];
+            // Guard against deleting root
+            if (entry.depth == 0 and entry.is_dir) return;
+            const msg = std.fmt.bufPrint(confirm_buf, "Delete '{s}'? (y/n)", .{entry.name}) catch "Delete entry? (y/n)";
+            confirm_dialog_ptr.* = Overlay.ConfirmDialogState.open(msg, entry.path, entry.is_dir);
+            mode.* = .confirm_dialog;
+        },
+        .tree_copy_path => {
+            const idx = ctx_menu_ptr.tree_entry_index orelse return;
+            if (idx >= file_tree.entries.items.len) return;
+            const entry = &file_tree.entries.items[idx];
+            if (std.fs.cwd().realpathAlloc(allocator, entry.path)) |abs_path| {
+                win.setClipboard(@constCast(abs_path));
+                allocator.free(abs_path);
+            } else |_| {}
+        },
+        .tree_copy_relative_path => {
+            const idx = ctx_menu_ptr.tree_entry_index orelse return;
+            if (idx >= file_tree.entries.items.len) return;
+            const entry = &file_tree.entries.items[idx];
+            if (allocator.dupe(u8, entry.path)) |rel_path| {
+                win.setClipboard(rel_path);
+                allocator.free(rel_path);
+            } else |_| {}
+        },
     }
-    _ = file_tree;
+}
+
+fn closeTabsForPath(tab_mgr: *TabManager, path: []const u8, is_dir: bool) void {
+    var i: usize = 0;
+    while (i < tab_mgr.tabs.items.len) {
+        const tab_path = tab_mgr.tabs.items[i].file_path orelse { i += 1; continue; };
+        const should_close = if (is_dir) std.mem.startsWith(u8, tab_path, path) else std.mem.eql(u8, tab_path, path);
+        if (should_close) {
+            tab_mgr.closeTab(i);
+        } else {
+            i += 1;
+        }
+    }
 }
 
 fn markAllPanesDirty(pane_mgr: *PaneManager) void {
@@ -1610,6 +1847,9 @@ fn renderFrame(
     show_signature: bool,
     tab_hover: ?usize,
     ctx_menu_state: *const Overlay.ContextMenuState,
+    confirm_dialog_state: *const Overlay.ConfirmDialogState,
+    status_msg: ?[]const u8,
+    status_time: i64,
 ) void {
     var renderer = Renderer{
         .buffer = win.getBuffer(),
@@ -1684,6 +1924,31 @@ fn renderFrame(
 
     // Context menu
     Overlay.renderContextMenu(&renderer, font, ctx_menu_state);
+
+    // Confirm dialog
+    Overlay.renderConfirmDialog(&renderer, font, confirm_dialog_state);
+
+    // Inline input for file tree CRUD
+    const tab_bar_h_input = view_mod.tabBarHeight(font);
+    file_tree.renderInlineInput(&renderer, font, tab_bar_h_input);
+
+    // Status message (3 second display)
+    if (status_msg) |msg| {
+        const elapsed = std.time.milliTimestamp() - status_time;
+        if (elapsed < 3000) {
+            const warn_color = render_mod.Color.fromHex(0xfab387);
+            const bar_y = renderer.height -| font.cell_height;
+            const center_x = renderer.width / 2 -| (@as(u32, @intCast(msg.len)) * font.cell_width / 2);
+            var sx = center_x;
+            for (msg) |ch| {
+                const glyph = font.getGlyph(@as(u21, ch)) catch continue;
+                const gx: i32 = @intCast(sx);
+                const gy: i32 = @as(i32, @intCast(bar_y)) + font.ascent - @as(i32, glyph.bearing_y);
+                renderer.drawGlyph(glyph, gx, gy, warn_color);
+                sx += font.cell_width;
+            }
+        }
+    }
 
     // IME cursor position updated separately via updateImeCursorPosition()
 
