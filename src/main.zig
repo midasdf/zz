@@ -40,6 +40,9 @@ const EditorMode = enum {
     rename,
     code_action,
     goto_references,
+    context_menu,
+    tree_input,
+    confirm_dialog,
 };
 
 const command_list = [_][]const u8{
@@ -68,18 +71,24 @@ const command_list = [_][]const u8{
     "Tab: Close All Tabs",
 };
 
-const context_menu_items = [_][]const u8{
-    "Cut",
-    "Copy",
-    "Paste",
-    "-",
-    "Select All",
-    "Select Word",
-    "-",
-    "Go to Definition",
-    "Find References",
-    "-",
-    "Command Palette...",
+const editor_menu_items = [_]Overlay.MenuItem{
+    .{ .label = "Cut", .shortcut = "Ctrl+X", .action = .ed_cut, .separator_after = false, .enabled = true },
+    .{ .label = "Copy", .shortcut = "Ctrl+C", .action = .ed_copy, .separator_after = false, .enabled = true },
+    .{ .label = "Paste", .shortcut = "Ctrl+V", .action = .ed_paste, .separator_after = true, .enabled = true },
+    .{ .label = "Select All", .shortcut = "Ctrl+A", .action = .ed_select_all, .separator_after = false, .enabled = true },
+    .{ .label = "Select Word", .shortcut = null, .action = .ed_select_word, .separator_after = true, .enabled = true },
+    .{ .label = "Go to Definition", .shortcut = "F12", .action = .ed_goto_definition, .separator_after = false, .enabled = true },
+    .{ .label = "Find References", .shortcut = "Shift+F12", .action = .ed_find_references, .separator_after = true, .enabled = true },
+    .{ .label = "Command Palette...", .shortcut = "Ctrl+Shift+P", .action = .ed_command_palette, .separator_after = false, .enabled = true },
+};
+
+const file_tree_menu_items = [_]Overlay.MenuItem{
+    .{ .label = "New File", .shortcut = null, .action = .tree_new_file, .separator_after = false, .enabled = true },
+    .{ .label = "New Folder", .shortcut = null, .action = .tree_new_folder, .separator_after = true, .enabled = true },
+    .{ .label = "Rename", .shortcut = "F2", .action = .tree_rename, .separator_after = false, .enabled = true },
+    .{ .label = "Delete", .shortcut = "Del", .action = .tree_delete, .separator_after = true, .enabled = true },
+    .{ .label = "Copy Path", .shortcut = null, .action = .tree_copy_path, .separator_after = false, .enabled = true },
+    .{ .label = "Copy Relative Path", .shortcut = null, .action = .tree_copy_relative_path, .separator_after = false, .enabled = true },
 };
 
 const font_path = "/usr/share/fonts/PlemolJP/PlemolJPConsoleNF-Regular.ttf";
@@ -265,10 +274,7 @@ pub fn main() !void {
     var hover_tab: ?usize = null;
 
     // Context menu state
-    var context_menu_active = false;
-    var context_menu_x: u32 = 0;
-    var context_menu_y: u32 = 0;
-    var context_menu_selected: usize = 0;
+    var ctx_menu = Overlay.ContextMenuState{ .items = &editor_menu_items, .selected = 0, .x = 0, .y = 0, .source = .editor, .tree_entry_index = null, .active = false };
 
     // Initialize cursors
     win.initCursors();
@@ -283,7 +289,7 @@ pub fn main() !void {
         editor.status_terminal_visible = terminal.visible;
         editor.status_diagnostic_count = @intCast(lsp_client.diagnostics.items.len);
         file_tree.active_path = if (editor.file_path) |p| p else null;
-        renderFrame(&tab_mgr, &pane_mgr, &win, &font, &overlay, &file_tree, &terminal, &lsp_client, completion_active, completion_selected, hover_active, signature_active, hover_tab, context_menu_active, context_menu_x, context_menu_y, context_menu_selected);
+        renderFrame(&tab_mgr, &pane_mgr, &win, &font, &overlay, &file_tree, &terminal, &lsp_client, completion_active, completion_selected, hover_active, signature_active, hover_tab, &ctx_menu);
     }
 
     while (running) {
@@ -299,39 +305,31 @@ pub fn main() !void {
                             .close => running = false,
 
                             .key_press => |ke| {
-                                if (context_menu_active) {
+                                if (ctx_menu.active) {
                                     if (ke.keysym == window_mod.XK_Escape) {
-                                        context_menu_active = false;
+                                        ctx_menu.close();
                                         editor.markAllDirty();
                                         continue;
                                     } else if (ke.keysym == window_mod.XK_Up) {
-                                        if (context_menu_selected > 0) context_menu_selected -= 1;
-                                        // Skip separators
-                                        while (context_menu_selected > 0 and context_menu_items[context_menu_selected].len == 1 and context_menu_items[context_menu_selected][0] == '-') {
-                                            context_menu_selected -= 1;
-                                        }
+                                        ctx_menu.moveUp();
                                         editor.markAllDirty();
                                         continue;
                                     } else if (ke.keysym == window_mod.XK_Down) {
-                                        if (context_menu_selected + 1 < context_menu_items.len) context_menu_selected += 1;
-                                        // Skip separators
-                                        while (context_menu_selected + 1 < context_menu_items.len and context_menu_items[context_menu_selected].len == 1 and context_menu_items[context_menu_selected][0] == '-') {
-                                            context_menu_selected += 1;
-                                        }
+                                        ctx_menu.moveDown();
                                         editor.markAllDirty();
                                         continue;
                                     } else if (ke.keysym == window_mod.XK_Return) {
-                                        const item = context_menu_items[context_menu_selected];
-                                        context_menu_active = false;
-                                        if (item.len > 1 or item[0] != '-') {
-                                            executeContextMenuItem(item, editor, &win, &lsp_client, &lsp_needs_sync, &mode, &overlay, &filtered_display, allocator, &file_list);
+                                        if (ctx_menu.selectedAction()) |action| {
+                                            ctx_menu.close();
+                                            executeMenuAction(action, editor, &win, &lsp_client, &lsp_needs_sync, &mode, &overlay, &filtered_display, allocator, &file_tree);
+                                        } else {
+                                            ctx_menu.close();
                                         }
                                         editor.markAllDirty();
                                         continue;
                                     } else {
-                                        context_menu_active = false;
+                                        ctx_menu.close();
                                         editor.markAllDirty();
-                                        // Fall through to process key normally
                                     }
                                 }
                                 if (hover_active) {
@@ -583,25 +581,18 @@ pub fn main() !void {
 
                             .mouse_press => |me| {
                                 // Dismiss or handle context menu
-                                if (context_menu_active and me.button == .left) {
-                                    context_menu_active = false;
-                                    // Check if click is inside context menu to execute action
+                                if (ctx_menu.active and me.button == .left) {
+                                    ctx_menu.close();
                                     const cell_h = font.cell_height;
                                     const cell_w = font.cell_width;
                                     if (cell_h > 0 and cell_w > 0) {
-                                        const menu_w = contextMenuWidth(cell_w);
-                                        const menu_content_h: u32 = @as(u32, @intCast(context_menu_items.len)) * cell_h;
-                                        const mx: i32 = @intCast(context_menu_x);
-                                        const my: i32 = @intCast(context_menu_y + 4);
-                                        if (me.x >= mx and me.x < mx + @as(i32, @intCast(menu_w)) and
-                                            me.y >= my and me.y < my + @as(i32, @intCast(menu_content_h)))
-                                        {
-                                            const row = @as(u32, @intCast(me.y - my)) / cell_h;
-                                            if (row < context_menu_items.len) {
-                                                const item = context_menu_items[row];
-                                                if (item.len > 1 or item[0] != '-') {
-                                                    executeContextMenuItem(item, editor, &win, &lsp_client, &lsp_needs_sync, &mode, &overlay, &filtered_display, allocator, &file_list);
-                                                }
+                                        const my_base: i32 = @intCast(ctx_menu.y + 4);
+                                        const items_count: u32 = @intCast(ctx_menu.items.len);
+                                        const items_h: i32 = @intCast(items_count * cell_h);
+                                        if (me.y >= my_base and me.y < my_base + items_h) {
+                                            const row = @as(usize, @intCast(@as(u32, @intCast(me.y - my_base)) / cell_h));
+                                            if (row < ctx_menu.items.len and ctx_menu.items[row].enabled) {
+                                                executeMenuAction(ctx_menu.items[row].action, editor, &win, &lsp_client, &lsp_needs_sync, &mode, &overlay, &filtered_display, allocator, &file_tree);
                                             }
                                         }
                                     }
@@ -697,31 +688,44 @@ pub fn main() !void {
                                 } else if (me.button == .middle) {
                                     win.requestPrimary();
                                 } else if (me.button == .right) {
-                                    // Right-click: show context menu
-                                    if (context_menu_active) {
-                                        context_menu_active = false;
+                                    if (ctx_menu.active) {
+                                        ctx_menu.close();
                                     } else {
-                                        // Focus the clicked pane first
-                                        if (terminal.focused) {
-                                            terminal.unfocus();
-                                        }
-                                        if (pane_mgr.isSplit()) {
-                                            if (pane_mgr.leafAtPixel(me.x, me.y)) |clicked_view| {
-                                                if (clicked_view != pane_mgr.active_leaf) {
-                                                    pane_mgr.active_leaf = clicked_view;
-                                                    syncTabToActivePane(&pane_mgr, &tab_mgr);
+                                        const px: u32 = if (me.x >= 0) @intCast(me.x) else 0;
+                                        const py: u32 = if (me.y >= 0) @intCast(me.y) else 0;
+                                        const sw = file_tree.sidebarWidth(&font);
+                                        if (file_tree.visible and me.x >= 0 and me.x < @as(i32, @intCast(sw))) {
+                                            // File tree right-click
+                                            const cell_h = font.cell_height;
+                                            if (cell_h > 0) {
+                                                const tree_tab_bar_h = font.cell_height + 8;
+                                                const top_pad: u32 = 4;
+                                                const content_start = tree_tab_bar_h + top_pad;
+                                                if (py >= content_start) {
+                                                    const row = (py - content_start) / cell_h;
+                                                    const entry_idx = file_tree.scroll_offset + row;
+                                                    if (entry_idx < file_tree.entries.items.len) {
+                                                        file_tree.selected = entry_idx;
+                                                        ctx_menu = Overlay.ContextMenuState.open(&file_tree_menu_items, px, py, .file_tree, entry_idx);
+                                                    }
                                                 }
                                             }
+                                        } else {
+                                            // Editor right-click (existing behavior preserved)
+                                            if (terminal.focused) terminal.unfocus();
+                                            if (pane_mgr.isSplit()) {
+                                                if (pane_mgr.leafAtPixel(me.x, me.y)) |clicked_view| {
+                                                    if (clicked_view != pane_mgr.active_leaf) {
+                                                        pane_mgr.active_leaf = clicked_view;
+                                                        syncTabToActivePane(&pane_mgr, &tab_mgr);
+                                                    }
+                                                }
+                                            }
+                                            const active_rc = pane_mgr.active_leaf;
+                                            const pos = active_rc.pixelToPosition(me.x, me.y, &font);
+                                            active_rc.cursor.moveTo(pos);
+                                            ctx_menu = Overlay.ContextMenuState.open(&editor_menu_items, px, py, .editor, null);
                                         }
-                                        // Move cursor to clicked position
-                                        const active_rc = pane_mgr.active_leaf;
-                                        const pos = active_rc.pixelToPosition(me.x, me.y, &font);
-                                        active_rc.cursor.moveTo(pos);
-
-                                        context_menu_active = true;
-                                        context_menu_x = if (me.x >= 0) @intCast(me.x) else 0;
-                                        context_menu_y = if (me.y >= 0) @intCast(me.y) else 0;
-                                        context_menu_selected = 0;
                                     }
                                     markAllPanesDirty(&pane_mgr);
                                 }
@@ -806,20 +810,15 @@ pub fn main() !void {
                                     }
 
                                     // Context menu hover
-                                    if (context_menu_active) {
+                                    if (ctx_menu.active) {
                                         const cell_h = font.cell_height;
-                                        const cell_w_h = font.cell_width;
-                                        if (cell_h > 0 and cell_w_h > 0) {
-                                            const menu_w_h = contextMenuWidth(cell_w_h);
-                                            const menu_content_h_h: u32 = @as(u32, @intCast(context_menu_items.len)) * cell_h;
-                                            const mx_h: i32 = @intCast(context_menu_x);
-                                            const my_h: i32 = @intCast(context_menu_y + 4);
-                                            if (me.x >= mx_h and me.x < mx_h + @as(i32, @intCast(menu_w_h)) and
-                                                me.y >= my_h and me.y < my_h + @as(i32, @intCast(menu_content_h_h)))
-                                            {
-                                                const row = @as(u32, @intCast(me.y - my_h)) / cell_h;
-                                                if (row < context_menu_items.len) {
-                                                    context_menu_selected = row;
+                                        if (cell_h > 0) {
+                                            const my_base: i32 = @intCast(ctx_menu.y + 4);
+                                            const items_h: i32 = @intCast(@as(u32, @intCast(ctx_menu.items.len)) * cell_h);
+                                            if (me.y >= my_base and me.y < my_base + items_h) {
+                                                const row = @as(usize, @intCast(@as(u32, @intCast(me.y - my_base)) / cell_h));
+                                                if (row < ctx_menu.items.len and ctx_menu.items[row].enabled) {
+                                                    ctx_menu.selected = row;
                                                     needs_redraw = true;
                                                 }
                                             }
@@ -1005,7 +1004,7 @@ pub fn main() !void {
             editor.lsp_diagnostics = lsp_client.diagnostics.items;
             editor.status_terminal_visible = terminal.visible;
             editor.status_diagnostic_count = @intCast(lsp_client.diagnostics.items.len);
-            renderFrame(&tab_mgr, &pane_mgr, &win, &font, &overlay, &file_tree, &terminal, &lsp_client, completion_active, completion_selected, hover_active, signature_active, hover_tab, context_menu_active, context_menu_x, context_menu_y, context_menu_selected);
+            renderFrame(&tab_mgr, &pane_mgr, &win, &font, &overlay, &file_tree, &terminal, &lsp_client, completion_active, completion_selected, hover_active, signature_active, hover_tab, &ctx_menu);
         }
     }
 }
@@ -1168,18 +1167,8 @@ fn handleStatusBarClick(
     return false;
 }
 
-/// Compute the pixel width of the context menu (matching overlay.zig renderContextMenu).
-fn contextMenuWidth(cell_w: u32) u32 {
-    var max_label_len: u32 = 0;
-    for (context_menu_items) |item| {
-        const len: u32 = @intCast(item.len);
-        if (len > max_label_len) max_label_len = len;
-    }
-    return (max_label_len + 4) * cell_w;
-}
-
-fn executeContextMenuItem(
-    item: []const u8,
+fn executeMenuAction(
+    action: Overlay.MenuAction,
     editor: *EditorView,
     win: *Window,
     lsp_client: *lsp.LspClient,
@@ -1188,26 +1177,21 @@ fn executeContextMenuItem(
     overlay_ptr: *Overlay,
     filtered_display: *std.ArrayList([]const u8),
     allocator: std.mem.Allocator,
-    file_list: *?[][]const u8,
+    file_tree: *FileTree,
 ) void {
-    if (std.mem.eql(u8, item, "Cut")) {
-        handleAction(editor, win, .cut, lsp_client, lsp_sync);
-    } else if (std.mem.eql(u8, item, "Copy")) {
-        handleAction(editor, win, .copy, lsp_client, lsp_sync);
-    } else if (std.mem.eql(u8, item, "Paste")) {
-        handleAction(editor, win, .paste, lsp_client, lsp_sync);
-    } else if (std.mem.eql(u8, item, "Select All")) {
-        handleAction(editor, win, .select_all, lsp_client, lsp_sync);
-    } else if (std.mem.eql(u8, item, "Select Word")) {
-        editor.selectWordAtPosition(editor.cursor.primary().head);
-    } else if (std.mem.eql(u8, item, "Go to Definition")) {
-        handleAction(editor, win, .goto_definition, lsp_client, lsp_sync);
-    } else if (std.mem.eql(u8, item, "Find References")) {
-        openGotoReferences(mode, overlay_ptr, editor, lsp_client, filtered_display, allocator);
-    } else if (std.mem.eql(u8, item, "Command Palette...")) {
-        openCommandPalette(mode, overlay_ptr, filtered_display, allocator);
+    switch (action) {
+        .ed_cut => handleAction(editor, win, .cut, lsp_client, lsp_sync),
+        .ed_copy => handleAction(editor, win, .copy, lsp_client, lsp_sync),
+        .ed_paste => handleAction(editor, win, .paste, lsp_client, lsp_sync),
+        .ed_select_all => handleAction(editor, win, .select_all, lsp_client, lsp_sync),
+        .ed_select_word => editor.selectWordAtPosition(editor.cursor.primary().head),
+        .ed_goto_definition => handleAction(editor, win, .goto_definition, lsp_client, lsp_sync),
+        .ed_find_references => openGotoReferences(mode, overlay_ptr, editor, lsp_client, filtered_display, allocator),
+        .ed_command_palette => openCommandPalette(mode, overlay_ptr, filtered_display, allocator),
+        // File tree actions — will be fully wired in Task 5
+        .tree_new_file, .tree_new_folder, .tree_rename, .tree_delete, .tree_copy_path, .tree_copy_relative_path => {},
     }
-    _ = file_list;
+    _ = file_tree;
 }
 
 fn markAllPanesDirty(pane_mgr: *PaneManager) void {
@@ -1625,10 +1609,7 @@ fn renderFrame(
     show_hover: bool,
     show_signature: bool,
     tab_hover: ?usize,
-    ctx_menu_active: bool,
-    ctx_menu_x: u32,
-    ctx_menu_y: u32,
-    ctx_menu_selected: usize,
+    ctx_menu_state: *const Overlay.ContextMenuState,
 ) void {
     var renderer = Renderer{
         .buffer = win.getBuffer(),
@@ -1702,9 +1683,7 @@ fn renderFrame(
     }
 
     // Context menu
-    if (ctx_menu_active) {
-        Overlay.renderContextMenu(&renderer, font, ctx_menu_x, ctx_menu_y, &context_menu_items, ctx_menu_selected);
-    }
+    Overlay.renderContextMenu(&renderer, font, ctx_menu_state);
 
     // IME cursor position updated separately via updateImeCursorPosition()
 
@@ -2088,7 +2067,7 @@ fn handleOverlayKey(
                 }
                 lsp_ops.freeRefDisplay(filtered_display, allocator);
             },
-            .normal => {},
+            .normal, .context_menu, .tree_input, .confirm_dialog => {},
         }
         overlay.close();
         mode.* = .normal;
