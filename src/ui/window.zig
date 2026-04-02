@@ -221,7 +221,7 @@ pub const Window = struct {
     cursor_arrow: c.xcb_cursor_t = 0,
     cursor_resize_h: c.xcb_cursor_t = 0,
     cursor_hand: c.xcb_cursor_t = 0,
-    current_cursor: CursorShape = .arrow,
+    current_cursor: ?CursorShape = null,
 
     // ── init ─────────────────────────────────────────────────────────
 
@@ -420,7 +420,9 @@ pub const Window = struct {
     }
 
     pub fn setCursor(self: *Window, shape: CursorShape) void {
-        if (shape == self.current_cursor) return;
+        if (self.current_cursor) |cur| {
+            if (shape == cur) return;
+        }
         self.current_cursor = shape;
         const cursor_id = switch (shape) {
             .arrow => self.cursor_arrow,

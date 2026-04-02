@@ -1149,9 +1149,7 @@ pub fn renderTabBar(
         // Tab label
         const label = if (tab.file_path) |p| basename(p) else "[untitled]";
         const label_len: u32 = @intCast(label.len);
-        const mod_extra: u32 = if (tab.modified) 2 else 0; // " +"
-        const close_btn_w: u32 = cell_w + cell_w / 2; // Space for × button
-        const tab_w = (label_len + mod_extra + 3) * cell_w + close_btn_w;
+        const tab_w = computeTabWidth(label_len, tab.modified, cell_w);
 
         // Tab background (full height minus bottom separator)
         renderer.fillRect(x, 0, tab_w, bar_h - 1, bg);
@@ -1185,7 +1183,8 @@ pub fn renderTabBar(
 
         // Close button "×" — right side of tab (brighter on hover)
         {
-            const close_x = x + tab_w - close_btn_w;
+            const close_btn_w_r: u32 = cell_w + cell_w / 2;
+            const close_x = x + tab_w - close_btn_w_r;
             const close_fg = if (is_active or is_hovered) active_theme.overlay0 else active_theme.surface2;
             if (font.getGlyph('x')) |glyph| {
                 const gx: i32 = @intCast(close_x + cell_w / 4);
@@ -1207,9 +1206,7 @@ pub fn tabAtPixel(tab_mgr: *const TabManager, click_x: i32, font: *const FontFac
     for (tab_mgr.tabs.items, 0..) |tab, i| {
         const label = if (tab.file_path) |p| basename(p) else "[untitled]";
         const label_len: u32 = @intCast(label.len);
-        const mod_extra: u32 = if (tab.modified) 2 else 0;
-        const close_btn_w: u32 = cell_w + cell_w / 2;
-        const tab_w = (label_len + mod_extra + 3) * cell_w + close_btn_w;
+        const tab_w = computeTabWidth(label_len, tab.modified, cell_w);
 
         const tab_x: i32 = @intCast(x);
         if (click_x >= tab_x and click_x < tab_x + @as(i32, @intCast(tab_w))) {
@@ -1248,6 +1245,13 @@ fn syntaxColor(kind: SyntaxKind) Color {
         .punctuation => active_theme.syn_punctuation,
         .none => active_theme.text,
     };
+}
+
+/// Compute the pixel width of a single tab, shared by renderTabBar and tabAtPixel.
+fn computeTabWidth(label_len: u32, modified: bool, cell_w: u32) u32 {
+    const mod_extra: u32 = if (modified) 2 else 0;
+    const close_btn_w: u32 = cell_w + cell_w / 2;
+    return (label_len + mod_extra + 3) * cell_w + close_btn_w;
 }
 
 fn basename(path: []const u8) []const u8 {

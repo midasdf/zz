@@ -192,6 +192,8 @@ pub const FileTree = struct {
         const entry = &self.entries.items[self.selected];
         if (!entry.is_dir) return;
 
+        self.hover_entry = null; // Invalidate hover on tree mutation
+
         if (entry.is_expanded) {
             // Collapse: remove all children
             self.collapseAt(self.selected);
@@ -500,6 +502,7 @@ pub const FileTree = struct {
 
     /// Handle scroll wheel in sidebar area.
     pub fn handleScroll(self: *FileTree, delta: i32) void {
+        self.hover_entry = null; // Invalidate hover on scroll
         const lines: i32 = delta * 3;
         if (lines < 0) {
             const up: usize = @intCast(-lines);

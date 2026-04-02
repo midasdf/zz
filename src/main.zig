@@ -571,7 +571,7 @@ pub fn main() !void {
                                 if (!terminal.focused) {
                                     // Route scroll to file tree sidebar if mouse is over it
                                     const sw = file_tree.sidebarWidth(&font);
-                                    if (file_tree.visible and mouse_x >= 0 and mouse_x < @as(i32, @intCast(sw))) {
+                                    if (file_tree.visible and mouse_x >= 0 and mouse_x < @as(i32, @intCast(sw)) and mouse_y >= @as(i32, @intCast(tab_bar_h))) {
                                         file_tree.handleScroll(s.delta);
                                         markAllPanesDirty(&pane_mgr);
                                     } else {
@@ -587,12 +587,21 @@ pub fn main() !void {
                                     context_menu_active = false;
                                     // Check if click is inside context menu to execute action
                                     const cell_h = font.cell_height;
-                                    if (cell_h > 0 and me.x >= @as(i32, @intCast(context_menu_x)) and me.y >= @as(i32, @intCast(context_menu_y + 4))) {
-                                        const row = @as(u32, @intCast(me.y - @as(i32, @intCast(context_menu_y + 4)))) / cell_h;
-                                        if (row < context_menu_items.len) {
-                                            const item = context_menu_items[row];
-                                            if (item.len > 1 or item[0] != '-') {
-                                                executeContextMenuItem(item, editor, &win, &lsp_client, &lsp_needs_sync, &mode, &overlay, &filtered_display, allocator, &file_list);
+                                    const cell_w = font.cell_width;
+                                    if (cell_h > 0 and cell_w > 0) {
+                                        const menu_w = contextMenuWidth(cell_w);
+                                        const menu_content_h: u32 = @as(u32, @intCast(context_menu_items.len)) * cell_h;
+                                        const mx: i32 = @intCast(context_menu_x);
+                                        const my: i32 = @intCast(context_menu_y + 4);
+                                        if (me.x >= mx and me.x < mx + @as(i32, @intCast(menu_w)) and
+                                            me.y >= my and me.y < my + @as(i32, @intCast(menu_content_h)))
+                                        {
+                                            const row = @as(u32, @intCast(me.y - my)) / cell_h;
+                                            if (row < context_menu_items.len) {
+                                                const item = context_menu_items[row];
+                                                if (item.len > 1 or item[0] != '-') {
+                                                    executeContextMenuItem(item, editor, &win, &lsp_client, &lsp_needs_sync, &mode, &overlay, &filtered_display, allocator, &file_list);
+                                                }
                                             }
                                         }
                                     }
@@ -692,6 +701,23 @@ pub fn main() !void {
                                     if (context_menu_active) {
                                         context_menu_active = false;
                                     } else {
+                                        // Focus the clicked pane first
+                                        if (terminal.focused) {
+                                            terminal.unfocus();
+                                        }
+                                        if (pane_mgr.isSplit()) {
+                                            if (pane_mgr.leafAtPixel(me.x, me.y)) |clicked_view| {
+                                                if (clicked_view != pane_mgr.active_leaf) {
+                                                    pane_mgr.active_leaf = clicked_view;
+                                                    syncTabToActivePane(&pane_mgr, &tab_mgr);
+                                                }
+                                            }
+                                        }
+                                        // Move cursor to clicked position
+                                        const active_rc = pane_mgr.active_leaf;
+                                        const pos = active_rc.pixelToPosition(me.x, me.y, &font);
+                                        active_rc.cursor.moveTo(pos);
+
                                         context_menu_active = true;
                                         context_menu_x = if (me.x >= 0) @intCast(me.x) else 0;
                                         context_menu_y = if (me.y >= 0) @intCast(me.y) else 0;
@@ -782,11 +808,20 @@ pub fn main() !void {
                                     // Context menu hover
                                     if (context_menu_active) {
                                         const cell_h = font.cell_height;
-                                        if (cell_h > 0 and me.y >= @as(i32, @intCast(context_menu_y + 4))) {
-                                            const row = @as(u32, @intCast(me.y - @as(i32, @intCast(context_menu_y + 4)))) / cell_h;
-                                            if (row < context_menu_items.len) {
-                                                context_menu_selected = row;
-                                                needs_redraw = true;
+                                        const cell_w_h = font.cell_width;
+                                        if (cell_h > 0 and cell_w_h > 0) {
+                                            const menu_w_h = contextMenuWidth(cell_w_h);
+                                            const menu_content_h_h: u32 = @as(u32, @intCast(context_menu_items.len)) * cell_h;
+                                            const mx_h: i32 = @intCast(context_menu_x);
+                                            const my_h: i32 = @intCast(context_menu_y + 4);
+                                            if (me.x >= mx_h and me.x < mx_h + @as(i32, @intCast(menu_w_h)) and
+                                                me.y >= my_h and me.y < my_h + @as(i32, @intCast(menu_content_h_h)))
+                                            {
+                                                const row = @as(u32, @intCast(me.y - my_h)) / cell_h;
+                                                if (row < context_menu_items.len) {
+                                                    context_menu_selected = row;
+                                                    needs_redraw = true;
+                                                }
                                             }
                                         }
                                     }
@@ -1131,6 +1166,16 @@ fn handleStatusBarClick(
     }
 
     return false;
+}
+
+/// Compute the pixel width of the context menu (matching overlay.zig renderContextMenu).
+fn contextMenuWidth(cell_w: u32) u32 {
+    var max_label_len: u32 = 0;
+    for (context_menu_items) |item| {
+        const len: u32 = @intCast(item.len);
+        if (len > max_label_len) max_label_len = len;
+    }
+    return (max_label_len + 4) * cell_w;
 }
 
 fn executeContextMenuItem(

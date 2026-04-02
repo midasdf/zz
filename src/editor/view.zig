@@ -746,6 +746,11 @@ pub const EditorView = struct {
 
     /// Select the word at a given byte offset (used by double-click).
     pub fn selectWordAtPosition(self: *EditorView, pos: u32) void {
+        // Guard: only expand if the character at pos is a word character
+        if (pos >= self.buffer.total_len) return;
+        const cur = self.buffer.contiguousSliceAt(pos);
+        if (cur.len == 0 or !isWordChar(cur[0])) return;
+
         var start = pos;
         while (start > 0) {
             const slice = self.buffer.contiguousSliceAt(start - 1);
@@ -941,8 +946,8 @@ pub const EditorView = struct {
         if (bar_h == 0) return;
 
         const rel_y: f32 = @floatFromInt(@max(py - @as(i32, @intCast(bar_y)), 0));
-        const bar_h_f: f32 = @floatFromInt(bar_h);
-        const ratio = @min(rel_y / bar_h_f, 1.0);
+        const denom: f32 = if (bar_h > 1) @floatFromInt(bar_h - 1) else 1.0;
+        const ratio = @min(rel_y / denom, 1.0);
         const max_scroll = total_lines -| self.visible_rows;
         self.scroll_line = @intFromFloat(ratio * @as(f32, @floatFromInt(max_scroll)));
         self.markAllDirty();
