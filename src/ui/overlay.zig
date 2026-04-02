@@ -245,31 +245,46 @@ pub const Overlay = struct {
         }
     }
 
-    /// Render a right-click context menu at the given pixel coordinates.
+    /// Render a right-click context menu using typed ContextMenuState.
     pub fn renderContextMenu(
         renderer: *Renderer,
         font: *FontFace,
-        menu_x: u32,
-        menu_y: u32,
-        items: []const []const u8,
-        selected_idx: usize,
+        state: *const ContextMenuState,
     ) void {
         const cell_w = font.cell_width;
         const cell_h = if (font.cell_height > 0) font.cell_height else 1;
         if (cell_w == 0) return;
 
-        // Calculate menu dimensions
+        const shortcut_color = Color.fromHex(0x9399b2); // overlay2
+        const disabled_color = Color.fromHex(0x585b70); // overlay0
+
+        // Calculate menu dimensions: widest label + gap + shortcut + padding, min 180px
         var max_label_len: u32 = 0;
-        for (items) |item| {
-            const len: u32 = @intCast(item.len);
-            if (len > max_label_len) max_label_len = len;
+        var max_shortcut_len: u32 = 0;
+        for (state.items) |item| {
+            const llen: u32 = @intCast(item.label.len);
+            if (llen > max_label_len) max_label_len = llen;
+            if (item.shortcut) |sc| {
+                const slen: u32 = @intCast(sc.len);
+                if (slen > max_shortcut_len) max_shortcut_len = slen;
+            }
         }
-        const menu_w = (max_label_len + 4) * cell_w; // 2 padding each side
-        const menu_h: u32 = @as(u32, @intCast(items.len)) * cell_h + 8; // 4px top + 4px bottom
+
+        // Width: 2 padding left + label + gap(2) + shortcut + 2 padding right, min 180
+        const content_w = (max_label_len + 2 + max_shortcut_len + 4) * cell_w;
+        const menu_w: u32 = @max(content_w, 180);
+
+        // Height: sum of item rows + separator gaps + 8px top/bottom padding
+        var total_h: u32 = 8;
+        for (state.items) |item| {
+            total_h += cell_h;
+            if (item.separator_after) total_h += 5; // 1px line + 4px gap
+        }
+        const menu_h = total_h;
 
         // Clamp menu position to window
-        const mx = if (menu_x + menu_w > renderer.width) renderer.width -| menu_w else menu_x;
-        const my = if (menu_y + menu_h > renderer.height) renderer.height -| menu_h else menu_y;
+        const mx = if (state.x + menu_w > renderer.width) renderer.width -| menu_w else state.x;
+        const my = if (state.y + menu_h > renderer.height) renderer.height -| menu_h else state.y;
 
         // Shadow (2px offset, darker)
         const shadow = Color.fromHex(0x0a0a0f);
@@ -277,31 +292,24 @@ pub const Overlay = struct {
 
         // Menu background + border
         renderer.fillRect(mx, my, menu_w, menu_h, overlay_bg);
-        // Top border
         renderer.fillRect(mx, my, menu_w, 1, overlay_border);
-        // Bottom border
         renderer.fillRect(mx, my + menu_h - 1, menu_w, 1, overlay_border);
-        // Left border
         renderer.fillRect(mx, my, 1, menu_h, overlay_border);
-        // Right border
         renderer.fillRect(mx + menu_w - 1, my, 1, menu_h, overlay_border);
 
         // Render items
         var y = my + 4;
-        for (items, 0..) |item, i| {
-            const is_sel = (i == selected_idx);
+        for (state.items, 0..) |item, i| {
+            const is_sel = (i == state.selected) and item.enabled;
             const row_bg = if (is_sel) overlay_selected else overlay_bg;
-            const row_fg = if (is_sel) overlay_text else overlay_dim;
+            const row_fg = if (!item.enabled) disabled_color else if (is_sel) overlay_text else overlay_dim;
 
             renderer.fillRect(mx + 1, y, menu_w - 2, cell_h, row_bg);
 
-            // Check for separator
-            if (item.len == 1 and item[0] == '-') {
-                // Draw separator line
-                renderer.fillRect(mx + cell_w, y + cell_h / 2, menu_w - cell_w * 2, 1, overlay_border);
-            } else {
+            // Label
+            {
                 var ix = mx + cell_w * 2;
-                for (item) |ch| {
+                for (item.label) |ch| {
                     const glyph = font.getGlyph(ch) catch continue;
                     const gx: i32 = @intCast(ix);
                     const gy: i32 = @as(i32, @intCast(y)) + font.ascent - @as(i32, glyph.bearing_y);
@@ -309,11 +317,135 @@ pub const Overlay = struct {
                     ix += cell_w;
                 }
             }
+
+            // Shortcut (right-aligned, overlay2 color)
+            if (item.shortcut) |sc| {
+                const sc_start_x = mx + menu_w - cell_w * 2 - @as(u32, @intCast(sc.len)) * cell_w;
+                var ix = sc_start_x;
+                for (sc) |ch| {
+                    const glyph = font.getGlyph(ch) catch continue;
+                    const gx: i32 = @intCast(ix);
+                    const gy: i32 = @as(i32, @intCast(y)) + font.ascent - @as(i32, glyph.bearing_y);
+                    renderer.drawGlyph(glyph, gx, gy, shortcut_color);
+                    ix += cell_w;
+                }
+            }
+
             y += cell_h;
+
+            // Separator after item
+            if (item.separator_after) {
+                renderer.fillRect(mx + cell_w, y, menu_w - cell_w * 2, 1, overlay_border);
+                y += 5;
+            }
         }
     }
 
-    fn dimScreen(renderer: *Renderer) void {
+    /// Render a confirmation dialog centered on screen.
+    pub fn renderConfirmDialog(
+        renderer: *Renderer,
+        font: *FontFace,
+        state: *const ConfirmDialogState,
+    ) void {
+        if (!state.active) return;
+
+        const cell_w = font.cell_width;
+        const cell_h = if (font.cell_height > 0) font.cell_height else 1;
+        if (cell_w == 0) return;
+
+        dimScreen(renderer);
+
+        const win_w = renderer.width;
+        const win_h = renderer.height;
+
+        // Dialog dimensions
+        const msg_len: u32 = @intCast(state.message.len);
+        const min_w: u32 = 300;
+        const dialog_w: u32 = @max((msg_len + 6) * cell_w, min_w);
+        const dialog_h: u32 = cell_h * 4 + 24; // title row + msg row + gap + button row + padding
+
+        const dialog_x = (win_w -| dialog_w) / 2;
+        const dialog_y = (win_h -| dialog_h) / 2;
+
+        // Shadow
+        const shadow = Color.fromHex(0x0a0a0f);
+        renderer.fillRect(dialog_x + 3, dialog_y + 3, dialog_w, dialog_h, shadow);
+
+        // Background + border
+        renderer.fillRect(dialog_x -| 1, dialog_y -| 1, dialog_w + 2, dialog_h + 2, overlay_border);
+        renderer.fillRect(dialog_x, dialog_y, dialog_w, dialog_h, overlay_bg);
+
+        var y = dialog_y + 12;
+
+        // Message text
+        {
+            var ix = dialog_x + cell_w * 2;
+            for (state.message) |ch| {
+                const glyph = font.getGlyph(ch) catch continue;
+                const gx: i32 = @intCast(ix);
+                const gy: i32 = @as(i32, @intCast(y)) + font.ascent - @as(i32, glyph.bearing_y);
+                renderer.drawGlyph(glyph, gx, gy, overlay_text);
+                ix += cell_w;
+            }
+        }
+        y += cell_h + 8;
+
+        // Separator
+        renderer.fillRect(dialog_x + cell_w, y, dialog_w - cell_w * 2, 1, overlay_border);
+        y += 8;
+
+        // Buttons: [Yes]  [No]
+        const btn_w: u32 = cell_w * 7; // "[ Yes ]"
+        const btn_gap: u32 = cell_w * 2;
+        const btns_total = btn_w * 2 + btn_gap;
+        const btn_start_x = dialog_x + (dialog_w -| btns_total) / 2;
+
+        const yes_bg = if (state.selected_yes) overlay_selected else overlay_bg;
+        const no_bg = if (!state.selected_yes) overlay_selected else overlay_bg;
+        const yes_fg = if (state.selected_yes) overlay_text else overlay_dim;
+        const no_fg = if (!state.selected_yes) overlay_text else overlay_dim;
+
+        // Yes button
+        renderer.fillRect(btn_start_x, y, btn_w, cell_h + 4, yes_bg);
+        renderer.fillRect(btn_start_x, y, btn_w, 1, overlay_border);
+        renderer.fillRect(btn_start_x, y + cell_h + 3, btn_w, 1, overlay_border);
+        renderer.fillRect(btn_start_x, y, 1, cell_h + 4, overlay_border);
+        renderer.fillRect(btn_start_x + btn_w - 1, y, 1, cell_h + 4, overlay_border);
+        {
+            const yes_label = "Yes";
+            const lx = btn_start_x + (btn_w -| @as(u32, @intCast(yes_label.len)) * cell_w) / 2;
+            var ix = lx;
+            for (yes_label) |ch| {
+                const glyph = font.getGlyph(ch) catch continue;
+                const gx: i32 = @intCast(ix);
+                const gy: i32 = @as(i32, @intCast(y + 2)) + font.ascent - @as(i32, glyph.bearing_y);
+                renderer.drawGlyph(glyph, gx, gy, yes_fg);
+                ix += cell_w;
+            }
+        }
+
+        // No button
+        const no_x = btn_start_x + btn_w + btn_gap;
+        renderer.fillRect(no_x, y, btn_w, cell_h + 4, no_bg);
+        renderer.fillRect(no_x, y, btn_w, 1, overlay_border);
+        renderer.fillRect(no_x, y + cell_h + 3, btn_w, 1, overlay_border);
+        renderer.fillRect(no_x, y, 1, cell_h + 4, overlay_border);
+        renderer.fillRect(no_x + btn_w - 1, y, 1, cell_h + 4, overlay_border);
+        {
+            const no_label = "No";
+            const lx = no_x + (btn_w -| @as(u32, @intCast(no_label.len)) * cell_w) / 2;
+            var ix = lx;
+            for (no_label) |ch| {
+                const glyph = font.getGlyph(ch) catch continue;
+                const gx: i32 = @intCast(ix);
+                const gy: i32 = @as(i32, @intCast(y + 2)) + font.ascent - @as(i32, glyph.bearing_y);
+                renderer.drawGlyph(glyph, gx, gy, no_fg);
+                ix += cell_w;
+            }
+        }
+    }
+
+    pub fn dimScreen(renderer: *Renderer) void {
         // Darken every pixel by blending with dark color at 60% opacity
         const dim = overlay_dim_bg;
         var i: usize = 0;
@@ -323,4 +455,116 @@ pub const Overlay = struct {
             renderer.buffer[i + 2] = @intCast((@as(u16, renderer.buffer[i + 2]) * 100 + @as(u16, dim.r) * 155) / 255);
         }
     }
+
+    pub const MenuSource = enum { editor, file_tree };
+
+    pub const MenuAction = enum {
+        tree_new_file,
+        tree_new_folder,
+        tree_rename,
+        tree_delete,
+        tree_copy_path,
+        tree_copy_relative_path,
+        ed_cut,
+        ed_copy,
+        ed_paste,
+        ed_select_all,
+        ed_select_word,
+        ed_goto_definition,
+        ed_find_references,
+        ed_command_palette,
+    };
+
+    pub const MenuItem = struct {
+        label: []const u8,
+        shortcut: ?[]const u8,
+        action: MenuAction,
+        separator_after: bool,
+        enabled: bool,
+    };
+
+    pub const ContextMenuState = struct {
+        items: []const MenuItem,
+        selected: usize,
+        x: u32,
+        y: u32,
+        source: MenuSource,
+        tree_entry_index: ?usize,
+        active: bool,
+
+        pub fn open(
+            items: []const MenuItem,
+            px: u32,
+            py: u32,
+            source: MenuSource,
+            tree_idx: ?usize,
+        ) ContextMenuState {
+            return .{
+                .items = items,
+                .selected = 0,
+                .x = px,
+                .y = py,
+                .source = source,
+                .tree_entry_index = tree_idx,
+                .active = true,
+            };
+        }
+
+        pub fn close(self: *ContextMenuState) void {
+            self.active = false;
+        }
+
+        pub fn moveUp(self: *ContextMenuState) void {
+            if (self.items.len == 0) return;
+            var idx = self.selected;
+            while (idx > 0) {
+                idx -= 1;
+                if (self.items[idx].enabled) {
+                    self.selected = idx;
+                    return;
+                }
+            }
+        }
+
+        pub fn moveDown(self: *ContextMenuState) void {
+            if (self.items.len == 0) return;
+            var idx = self.selected + 1;
+            while (idx < self.items.len) : (idx += 1) {
+                if (self.items[idx].enabled) {
+                    self.selected = idx;
+                    return;
+                }
+            }
+        }
+
+        pub fn selectedAction(self: *const ContextMenuState) ?MenuAction {
+            if (!self.active) return null;
+            if (self.selected >= self.items.len) return null;
+            const item = self.items[self.selected];
+            if (!item.enabled) return null;
+            return item.action;
+        }
+    };
+
+    pub const ConfirmDialogState = struct {
+        message: []const u8,
+        selected_yes: bool,
+        active: bool,
+        target_path: []const u8,
+        target_is_dir: bool,
+
+        pub fn open(
+            message: []const u8,
+            target_path: []const u8,
+            is_dir: bool,
+        ) ConfirmDialogState {
+            return .{
+                .message = message,
+                .selected_yes = false,
+                .active = true,
+                .target_path = target_path,
+                .target_is_dir = is_dir,
+            };
+        }
+    };
 };
