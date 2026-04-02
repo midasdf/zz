@@ -245,6 +245,74 @@ pub const Overlay = struct {
         }
     }
 
+    /// Render a right-click context menu at the given pixel coordinates.
+    pub fn renderContextMenu(
+        renderer: *Renderer,
+        font: *FontFace,
+        menu_x: u32,
+        menu_y: u32,
+        items: []const []const u8,
+        selected_idx: usize,
+    ) void {
+        const cell_w = font.cell_width;
+        const cell_h = if (font.cell_height > 0) font.cell_height else 1;
+        if (cell_w == 0) return;
+
+        // Calculate menu dimensions
+        var max_label_len: u32 = 0;
+        for (items) |item| {
+            const len: u32 = @intCast(item.len);
+            if (len > max_label_len) max_label_len = len;
+        }
+        const menu_w = (max_label_len + 4) * cell_w; // 2 padding each side
+        const menu_h: u32 = @as(u32, @intCast(items.len)) * cell_h + 8; // 4px top + 4px bottom
+
+        // Clamp menu position to window
+        const mx = if (menu_x + menu_w > renderer.width) renderer.width -| menu_w else menu_x;
+        const my = if (menu_y + menu_h > renderer.height) renderer.height -| menu_h else menu_y;
+
+        // Shadow (2px offset, darker)
+        const shadow = Color.fromHex(0x0a0a0f);
+        renderer.fillRect(mx + 2, my + 2, menu_w, menu_h, shadow);
+
+        // Menu background + border
+        renderer.fillRect(mx, my, menu_w, menu_h, overlay_bg);
+        // Top border
+        renderer.fillRect(mx, my, menu_w, 1, overlay_border);
+        // Bottom border
+        renderer.fillRect(mx, my + menu_h - 1, menu_w, 1, overlay_border);
+        // Left border
+        renderer.fillRect(mx, my, 1, menu_h, overlay_border);
+        // Right border
+        renderer.fillRect(mx + menu_w - 1, my, 1, menu_h, overlay_border);
+
+        // Render items
+        var y = my + 4;
+        for (items, 0..) |item, i| {
+            const is_sel = (i == selected_idx);
+            const row_bg = if (is_sel) overlay_selected else overlay_bg;
+            const row_fg = if (is_sel) overlay_text else overlay_dim;
+
+            renderer.fillRect(mx + 1, y, menu_w - 2, cell_h, row_bg);
+
+            // Check for separator
+            if (item.len == 1 and item[0] == '-') {
+                // Draw separator line
+                renderer.fillRect(mx + cell_w, y + cell_h / 2, menu_w - cell_w * 2, 1, overlay_border);
+            } else {
+                var ix = mx + cell_w * 2;
+                for (item) |ch| {
+                    const glyph = font.getGlyph(ch) catch continue;
+                    const gx: i32 = @intCast(ix);
+                    const gy: i32 = @as(i32, @intCast(y)) + font.ascent - @as(i32, glyph.bearing_y);
+                    renderer.drawGlyph(glyph, gx, gy, row_fg);
+                    ix += cell_w;
+                }
+            }
+            y += cell_h;
+        }
+    }
+
     fn dimScreen(renderer: *Renderer) void {
         // Darken every pixel by blending with dark color at 60% opacity
         const dim = overlay_dim_bg;

@@ -152,6 +152,8 @@ fn xcbStateToMods(state: u16) Modifiers {
     };
 }
 
+pub const CursorShape = enum { arrow, text, resize_h, hand };
+
 // ── Window struct ────────────────────────────────────────────────────
 
 pub const Window = struct {
@@ -213,6 +215,13 @@ pub const Window = struct {
 
     // Clipboard ownership — we own this memory
     clipboard_content: ?[]u8 = null,
+
+    // XCB cursor shapes
+    cursor_text: c.xcb_cursor_t = 0,
+    cursor_arrow: c.xcb_cursor_t = 0,
+    cursor_resize_h: c.xcb_cursor_t = 0,
+    cursor_hand: c.xcb_cursor_t = 0,
+    current_cursor: ?CursorShape = null,
 
     // ── init ─────────────────────────────────────────────────────────
 
@@ -382,6 +391,48 @@ pub const Window = struct {
         };
         // NOTE: XKB and XIM are lazy-initialized on first key event,
         // after the struct is at its final memory address.
+
+        // NOTE: Cursors are initialized lazily via initCursors()
+        // after the struct is at its final memory address.
+    }
+
+    // ── Cursor shapes ──────────────────────────────────────────────────
+
+    pub fn initCursors(self: *Window) void {
+        // XC_xterm = 152, XC_left_ptr = 68, XC_sb_h_double_arrow = 108, XC_hand2 = 60
+        const cursor_font = c.xcb_generate_id(self.connection);
+        _ = c.xcb_open_font(self.connection, cursor_font, 6, "cursor");
+
+        self.cursor_arrow = c.xcb_generate_id(self.connection);
+        _ = c.xcb_create_glyph_cursor(self.connection, self.cursor_arrow, cursor_font, cursor_font, 68, 69, 0xFFFF, 0xFFFF, 0xFFFF, 0, 0, 0);
+
+        self.cursor_text = c.xcb_generate_id(self.connection);
+        _ = c.xcb_create_glyph_cursor(self.connection, self.cursor_text, cursor_font, cursor_font, 152, 153, 0xFFFF, 0xFFFF, 0xFFFF, 0, 0, 0);
+
+        self.cursor_resize_h = c.xcb_generate_id(self.connection);
+        _ = c.xcb_create_glyph_cursor(self.connection, self.cursor_resize_h, cursor_font, cursor_font, 108, 109, 0xFFFF, 0xFFFF, 0xFFFF, 0, 0, 0);
+
+        self.cursor_hand = c.xcb_generate_id(self.connection);
+        _ = c.xcb_create_glyph_cursor(self.connection, self.cursor_hand, cursor_font, cursor_font, 60, 61, 0xFFFF, 0xFFFF, 0xFFFF, 0, 0, 0);
+
+        _ = c.xcb_close_font(self.connection, cursor_font);
+        _ = c.xcb_flush(self.connection);
+    }
+
+    pub fn setCursor(self: *Window, shape: CursorShape) void {
+        if (self.current_cursor) |cur| {
+            if (shape == cur) return;
+        }
+        self.current_cursor = shape;
+        const cursor_id = switch (shape) {
+            .arrow => self.cursor_arrow,
+            .text => self.cursor_text,
+            .resize_h => self.cursor_resize_h,
+            .hand => self.cursor_hand,
+        };
+        if (cursor_id == 0) return;
+        _ = c.xcb_change_window_attributes(self.connection, self.window, c.XCB_CW_CURSOR, &cursor_id);
+        _ = c.xcb_flush(self.connection);
     }
 
     // ── deinit ───────────────────────────────────────────────────────
@@ -414,6 +465,11 @@ pub const Window = struct {
         if (self.pending_event) |pe| {
             std.c.free(pe);
         }
+        // Cursors
+        if (self.cursor_arrow != 0) _ = c.xcb_free_cursor(self.connection, self.cursor_arrow);
+        if (self.cursor_text != 0) _ = c.xcb_free_cursor(self.connection, self.cursor_text);
+        if (self.cursor_resize_h != 0) _ = c.xcb_free_cursor(self.connection, self.cursor_resize_h);
+        if (self.cursor_hand != 0) _ = c.xcb_free_cursor(self.connection, self.cursor_hand);
         // XCB
         _ = c.xcb_free_gc(self.connection, self.gc);
         _ = c.xcb_destroy_window(self.connection, self.window);

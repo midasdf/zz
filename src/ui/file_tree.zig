@@ -28,6 +28,7 @@ pub const FileTree = struct {
     allocator: std.mem.Allocator,
     root_path: []const u8,
     active_path: ?[]const u8, // Currently open file (for highlighting)
+    hover_entry: ?usize = null, // Entry under mouse cursor (for hover highlight)
 
     pub const Entry = struct {
         name: []u8,
@@ -190,6 +191,8 @@ pub const FileTree = struct {
         if (self.selected >= self.entries.items.len) return;
         const entry = &self.entries.items[self.selected];
         if (!entry.is_dir) return;
+
+        self.hover_entry = null; // Invalidate hover on tree mutation
 
         if (entry.is_expanded) {
             // Collapse: remove all children
@@ -360,10 +363,13 @@ pub const FileTree = struct {
             const entry = self.entries.items[entry_idx];
             const row_y = content_y + @as(u32, @intCast(row)) * cell_h;
 
-            // Selected highlight — surface1 background
+            // Selected or hover highlight
             const is_selected = (entry_idx == self.selected);
+            const is_hovered = if (self.hover_entry) |h| h == entry_idx else false;
             if (is_selected) {
                 renderer.fillRect(0, row_y, sw - 1, cell_h, theme.surface1);
+            } else if (is_hovered) {
+                renderer.fillRect(0, row_y, sw - 1, cell_h, theme.surface0);
             }
 
             // Indentation — 16px per depth level
@@ -459,8 +465,44 @@ pub const FileTree = struct {
         return entry.path;
     }
 
+    /// Update hover entry based on mouse position. Returns true if hover changed.
+    pub fn handleMouseMotion(self: *FileTree, px: i32, py: i32, font: *const FontFace, tab_bar_h: u32) bool {
+        if (!self.visible) {
+            if (self.hover_entry != null) {
+                self.hover_entry = null;
+                return true;
+            }
+            return false;
+        }
+
+        const cell_h = font.cell_height;
+        if (cell_h == 0) return false;
+
+        const top_pad: u32 = 4;
+        const content_start = tab_bar_h + top_pad;
+        const sw = self.sidebarWidth(font);
+
+        const old_hover = self.hover_entry;
+
+        if (px < 0 or px >= @as(i32, @intCast(sw)) or py < @as(i32, @intCast(content_start))) {
+            self.hover_entry = null;
+        } else {
+            const adj_y = @as(u32, @intCast(py)) - content_start;
+            const row = adj_y / cell_h;
+            const entry_idx = self.scroll_offset + row;
+            if (entry_idx < self.entries.items.len) {
+                self.hover_entry = entry_idx;
+            } else {
+                self.hover_entry = null;
+            }
+        }
+
+        return self.hover_entry != old_hover;
+    }
+
     /// Handle scroll wheel in sidebar area.
     pub fn handleScroll(self: *FileTree, delta: i32) void {
+        self.hover_entry = null; // Invalidate hover on scroll
         const lines: i32 = delta * 3;
         if (lines < 0) {
             const up: usize = @intCast(-lines);
