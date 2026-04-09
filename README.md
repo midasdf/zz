@@ -218,3 +218,6 @@ All rendering is CPU-based (xcb shared memory). No GPU, no OpenGL, no Wayland (y
 ## License
 
 MIT
+
+## Disclaimer
+This project uses AI-generated code (LLM). I do my best to review and test it, but I can't guarantee it's perfect. Please use it at your own risk.\n
