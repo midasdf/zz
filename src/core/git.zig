@@ -5,6 +5,7 @@ pub const GitInfo = struct {
     branch_len: u32 = 0,
     diff_lines: std.ArrayList(DiffLine),
     allocator: std.mem.Allocator,
+    io: std.Io,
 
     pub const DiffLine = struct {
         line: u32, // 0-based line number
@@ -13,10 +14,11 @@ pub const GitInfo = struct {
         pub const Kind = enum { added, modified, deleted };
     };
 
-    pub fn init(allocator: std.mem.Allocator) GitInfo {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io) GitInfo {
         return .{
-            .diff_lines = .{},
+            .diff_lines = .empty,
             .allocator = allocator,
+            .io = io,
         };
     }
 
@@ -26,7 +28,7 @@ pub const GitInfo = struct {
 
     /// Read current branch from .git/HEAD
     pub fn readBranch(self: *GitInfo) void {
-        const head = std.fs.cwd().readFileAlloc(self.allocator, ".git/HEAD", 256) catch return;
+        const head = std.Io.Dir.cwd().readFileAlloc(self.io, ".git/HEAD", self.allocator, .limited(256)) catch return;
         defer self.allocator.free(head);
 
         const prefix = "ref: refs/heads/";
@@ -54,8 +56,7 @@ pub const GitInfo = struct {
     pub fn computeDiff(self: *GitInfo, file_path: []const u8) void {
         self.diff_lines.clearRetainingCapacity();
 
-        const result = std.process.Child.run(.{
-            .allocator = self.allocator,
+        const result = std.process.run(self.allocator, self.io, .{
             .argv = &.{ "git", "diff", "HEAD", "--unified=0", "--", file_path },
         }) catch return;
         defer self.allocator.free(result.stdout);
