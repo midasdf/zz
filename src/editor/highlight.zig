@@ -86,16 +86,18 @@ pub const Highlighter = struct {
     language: ?*const ts.TSLanguage,
     cached_highlights: std.ArrayList(Highlight),
     allocator: std.mem.Allocator,
+    io: std.Io,
     lang_name: []const u8,
 
-    pub fn init(allocator: std.mem.Allocator) Highlighter {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io) Highlighter {
         return .{
             .parser = ts.ts_parser_new(),
             .tree = null,
             .query = null,
             .language = null,
-            .cached_highlights = .{},
+            .cached_highlights = .empty,
             .allocator = allocator,
+            .io = io,
             .lang_name = "Plain",
         };
     }
@@ -196,25 +198,24 @@ pub const Highlighter = struct {
         const lang = self.language orelse return;
 
         // Try bundled queries first, then system path
+        const cwd = std.Io.Dir.cwd();
         var path_buf: [256]u8 = undefined;
-        const file = blk: {
+        const source = blk: {
             // 1. Bundled: queries/{lang}/highlights.scm (relative to executable)
             const bundled_path = std.fmt.bufPrint(&path_buf, "queries/{s}/highlights.scm", .{query_dir}) catch break :blk null;
-            if (std.fs.cwd().openFile(bundled_path, .{})) |f| break :blk f else |_| {}
+            if (cwd.readFileAlloc(self.io, bundled_path, self.allocator, .limited(1024 * 1024))) |s| break :blk s else |_| {}
 
             // 2. Relative to executable directory
-            const exe_dir = std.fs.selfExeDirPath(&path_buf) catch break :blk null;
+            const exe_dir_len = std.process.executableDirPath(self.io, &path_buf) catch break :blk null;
+            const exe_dir = path_buf[0..exe_dir_len];
             var path_buf2: [512]u8 = undefined;
             const exe_path = std.fmt.bufPrint(&path_buf2, "{s}/../queries/{s}/highlights.scm", .{ exe_dir, query_dir }) catch break :blk null;
-            if (std.fs.cwd().openFile(exe_path, .{})) |f| break :blk f else |_| {}
+            if (cwd.readFileAlloc(self.io, exe_path, self.allocator, .limited(1024 * 1024))) |s| break :blk s else |_| {}
 
             // 3. System: /usr/share/tree-sitter/queries/{lang}/highlights.scm
             const sys_path = std.fmt.bufPrint(&path_buf, "/usr/share/tree-sitter/queries/{s}/highlights.scm", .{query_dir}) catch break :blk null;
-            break :blk std.fs.cwd().openFile(sys_path, .{}) catch null;
+            break :blk cwd.readFileAlloc(self.io, sys_path, self.allocator, .limited(1024 * 1024)) catch null;
         } orelse return;
-        defer file.close();
-
-        const source = file.readToEndAlloc(self.allocator, 1024 * 1024) catch return;
         defer self.allocator.free(source);
 
         var error_offset: u32 = 0;
@@ -229,12 +230,7 @@ pub const Highlighter = struct {
         );
 
         if (self.query == null and error_type != ts.TSQueryErrorNone) {
-            // Query parse failed — log to stderr for debugging
-            const stderr = std.posix.STDERR_FILENO;
-            _ = std.posix.write(stderr, "zz: tree-sitter query error at offset ") catch {};
-            var err_buf: [32]u8 = undefined;
-            const err_str = std.fmt.bufPrint(&err_buf, "{d}\n", .{error_offset}) catch "";
-            _ = std.posix.write(stderr, err_str) catch {};
+            std.debug.print("zz: tree-sitter query error at offset {d}\n", .{error_offset});
         }
     }
 

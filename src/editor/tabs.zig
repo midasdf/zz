@@ -6,12 +6,14 @@ pub const TabManager = struct {
     tabs: std.ArrayList(*EditorView),
     active: usize,
     allocator: std.mem.Allocator,
+    io: std.Io,
 
-    pub fn init(allocator: std.mem.Allocator) TabManager {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io) TabManager {
         return .{
             .tabs = .empty,
             .active = 0,
             .allocator = allocator,
+            .io = io,
         };
     }
 
@@ -28,7 +30,7 @@ pub const TabManager = struct {
     pub fn addTab(self: *TabManager, content: []const u8, file_path: ?[]const u8) !*EditorView {
         const view = try self.allocator.create(EditorView);
         errdefer self.allocator.destroy(view);
-        view.* = try EditorView.init(self.allocator, content);
+        view.* = try EditorView.init(self.allocator, self.io, content);
         errdefer view.deinit();
         if (file_path) |p| {
             view.file_path = try self.allocator.dupe(u8, p);
@@ -135,7 +137,7 @@ pub const TabManager = struct {
         self.tabs.clearRetainingCapacity();
         // Create a new empty tab
         const new_view = self.allocator.create(EditorView) catch return;
-        new_view.* = EditorView.init(self.allocator, "") catch {
+        new_view.* = EditorView.init(self.allocator, self.io, "") catch {
             self.allocator.destroy(new_view);
             return;
         };

@@ -76,6 +76,7 @@ pub const ServerCapabilities = struct {
 pub const LspClient = struct {
     process: ?std.process.Child,
     allocator: std.mem.Allocator,
+    io: std.Io,
     next_id: u32,
     server_capabilities: ServerCapabilities,
     initialized: bool,
@@ -141,35 +142,36 @@ pub const LspClient = struct {
     pending_references_id: ?u32,
     pending_signature_id: ?u32,
 
-    pub fn init(allocator: std.mem.Allocator) LspClient {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io) LspClient {
         return .{
             .process = null,
             .allocator = allocator,
+            .io = io,
             .next_id = 1,
             .server_capabilities = .{},
             .initialized = false,
-            .diagnostics = .{},
-            .completion_items = .{},
+            .diagnostics = .empty,
+            .completion_items = .empty,
             .has_completion = false,
             .goto_location = null,
             .has_goto = false,
             .hover_text = null,
             .has_hover = false,
-            .formatting_edits = .{},
+            .formatting_edits = .empty,
             .has_formatting = false,
-            .document_symbols = .{},
+            .document_symbols = .empty,
             .has_symbols = false,
-            .rename_edits = .{},
+            .rename_edits = .empty,
             .has_rename = false,
-            .code_actions = .{},
+            .code_actions = .empty,
             .has_code_actions = false,
-            .references = .{},
+            .references = .empty,
             .has_references = false,
             .signature = null,
             .has_signature = false,
             .read_buf = undefined,
             .read_pos = 0,
-            .msg_buf = .{},
+            .msg_buf = .empty,
             .expected_content_length = null,
             .doc_version = 1,
             .pending_completion_id = null,
@@ -198,19 +200,22 @@ pub const LspClient = struct {
         }
         if (argc == 0) return error.InvalidCommand;
 
-        var child = std.process.Child.init(argv_buf[0..argc], self.allocator);
-        child.stdin_behavior = .Pipe;
-        child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Ignore;
-
-        try child.spawn();
+        const child = try std.process.spawn(self.io, .{
+            .argv = argv_buf[0..argc],
+            .stdin = .pipe,
+            .stdout = .pipe,
+            .stderr = .ignore,
+        });
         self.process = child;
 
         // Set stdout to non-blocking for epoll integration
         if (child.stdout) |stdout| {
             const fd = stdout.handle;
-            const flags = posix.fcntl(fd, posix.F.GETFL, 0) catch 0;
-            _ = posix.fcntl(fd, posix.F.SETFL, flags | 0x800) catch {}; // O_NONBLOCK
+            const F_GETFL: c_int = 3;
+            const F_SETFL: c_int = 4;
+            const O_NONBLOCK: c_int = 0x800;
+            const flags = std.c.fcntl(fd, F_GETFL, @as(c_int, 0));
+            _ = std.c.fcntl(fd, F_SETFL, flags | O_NONBLOCK);
         }
 
         // Send initialize request
@@ -226,13 +231,15 @@ pub const LspClient = struct {
 
         // Close pipes and wait/kill process
         if (self.process) |*proc| {
-            if (proc.stdin) |f| f.close();
+            if (proc.stdin) |f| f.close(self.io);
             proc.stdin = null;
-            if (proc.stdout) |f| f.close();
+            if (proc.stdout) |f| f.close(self.io);
             proc.stdout = null;
-            if (proc.stderr) |f| f.close();
+            if (proc.stderr) |f| f.close(self.io);
             proc.stderr = null;
-            _ = proc.wait() catch proc.kill() catch {};
+            _ = proc.wait(self.io) catch {
+                proc.kill(self.io);
+            };
         }
         self.process = null;
 
@@ -405,7 +412,8 @@ pub const LspClient = struct {
         const stdout = if (self.process) |proc| proc.stdout orelse return else return;
 
         // Read available bytes (non-blocking)
-        const n = stdout.read(self.read_buf[self.read_pos..]) catch |err| {
+        var buffers = [_][]u8{self.read_buf[self.read_pos..]};
+        const n = stdout.readStreaming(self.io, &buffers) catch |err| {
             switch (err) {
                 error.WouldBlock => return,
                 else => return,
@@ -1389,12 +1397,12 @@ pub const LspClient = struct {
 
         const stdin = if (self.process) |proc| proc.stdin orelse return else return;
 
-        stdin.writeAll(header) catch return;
-        stdin.writeAll(wrapper_prefix) catch return;
-        stdin.writeAll(params_prefix) catch return;
-        writeJsonEscaped(stdin, text_content);
-        stdin.writeAll(params_suffix) catch return;
-        stdin.writeAll(wrapper_suffix) catch return;
+        stdin.writeStreamingAll(self.io, header) catch return;
+        stdin.writeStreamingAll(self.io, wrapper_prefix) catch return;
+        stdin.writeStreamingAll(self.io, params_prefix) catch return;
+        writeJsonEscaped(stdin, self.io, text_content);
+        stdin.writeStreamingAll(self.io, params_suffix) catch return;
+        stdin.writeStreamingAll(self.io, wrapper_suffix) catch return;
     }
 
     fn writeMessage(self: *LspClient, body: []const u8) void {
@@ -1402,8 +1410,8 @@ pub const LspClient = struct {
         const header = std.fmt.bufPrint(&header_buf, "Content-Length: {d}\r\n\r\n", .{body.len}) catch return;
 
         const stdin = if (self.process) |proc| proc.stdin orelse return else return;
-        stdin.writeAll(header) catch return;
-        stdin.writeAll(body) catch return;
+        stdin.writeStreamingAll(self.io, header) catch return;
+        stdin.writeStreamingAll(self.io, body) catch return;
     }
 
     fn sendInitialize(self: *LspClient, root_path: []const u8) void {
@@ -1753,7 +1761,7 @@ fn jsonEscapedLen(s: []const u8) usize {
     return len;
 }
 
-fn writeJsonEscaped(file: std.fs.File, s: []const u8) void {
+fn writeJsonEscaped(file: std.Io.File, io: std.Io, s: []const u8) void {
     var write_start: usize = 0;
     for (s, 0..) |c, i| {
         const escape: ?[]const u8 = switch (c) {
@@ -1765,7 +1773,7 @@ fn writeJsonEscaped(file: std.fs.File, s: []const u8) void {
             else => if (c < 0x20) blk: {
                 // Flush preceding clean segment
                 if (i > write_start) {
-                    file.writeAll(s[write_start..i]) catch return;
+                    file.writeStreamingAll(io,s[write_start..i]) catch return;
                 }
                 // Write \u00XX escape
                 var esc_buf: [6]u8 = undefined;
@@ -1776,22 +1784,22 @@ fn writeJsonEscaped(file: std.fs.File, s: []const u8) void {
                 esc_buf[3] = '0';
                 esc_buf[4] = hex[c >> 4];
                 esc_buf[5] = hex[c & 0xf];
-                file.writeAll(&esc_buf) catch return;
+                file.writeStreamingAll(io,&esc_buf) catch return;
                 write_start = i + 1;
                 break :blk null;
             } else null,
         };
         if (escape) |esc| {
             if (i > write_start) {
-                file.writeAll(s[write_start..i]) catch return;
+                file.writeStreamingAll(io,s[write_start..i]) catch return;
             }
-            file.writeAll(esc) catch return;
+            file.writeStreamingAll(io,esc) catch return;
             write_start = i + 1;
         }
     }
     // Flush remaining
     if (write_start < s.len) {
-        file.writeAll(s[write_start..]) catch return;
+        file.writeStreamingAll(io,s[write_start..]) catch return;
     }
 }
 
