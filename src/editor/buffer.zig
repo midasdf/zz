@@ -468,10 +468,9 @@ pub const PieceTable = struct {
 // =============================================================================
 
 fn expectContent(buf: *const PieceTable, expected: []const u8) !void {
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(std.testing.allocator);
-    try buf.writeAll(out.writer(std.testing.allocator));
-    try std.testing.expectEqualStrings(expected, out.items);
+    const out = try buf.collectContent(std.testing.allocator);
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqualStrings(expected, out);
 }
 
 test "init empty" {
