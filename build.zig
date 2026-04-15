@@ -16,20 +16,20 @@ pub fn build(b: *std.Build) void {
         .root_module = exe_mod,
     });
 
-    exe.linkSystemLibrary("xcb");
-    exe.linkSystemLibrary("xcb-shm");
-    exe.linkSystemLibrary("xcb-xkb");
-    exe.linkSystemLibrary("xkbcommon");
-    exe.linkSystemLibrary("xkbcommon-x11");
-    exe.linkSystemLibrary("xcb-imdkit");
-    exe.linkSystemLibrary("freetype2");
-    exe.linkSystemLibrary("tree-sitter");
-    exe.linkSystemLibrary("tree-sitter-c");
-    exe.linkSystemLibrary("tree-sitter-python");
-    exe.linkSystemLibrary("tree-sitter-rust");
-    exe.linkSystemLibrary("tree-sitter-javascript");
-    exe.linkSystemLibrary("tree-sitter-bash");
-    exe.linkLibC();
+    exe_mod.linkSystemLibrary("xcb", .{});
+    exe_mod.linkSystemLibrary("xcb-shm", .{});
+    exe_mod.linkSystemLibrary("xcb-xkb", .{});
+    exe_mod.linkSystemLibrary("xkbcommon", .{});
+    exe_mod.linkSystemLibrary("xkbcommon-x11", .{});
+    exe_mod.linkSystemLibrary("xcb-imdkit", .{});
+    exe_mod.linkSystemLibrary("freetype2", .{});
+    exe_mod.linkSystemLibrary("tree-sitter", .{});
+    exe_mod.linkSystemLibrary("tree-sitter-c", .{});
+    exe_mod.linkSystemLibrary("tree-sitter-python", .{});
+    exe_mod.linkSystemLibrary("tree-sitter-rust", .{});
+    exe_mod.linkSystemLibrary("tree-sitter-javascript", .{});
+    exe_mod.linkSystemLibrary("tree-sitter-bash", .{});
+    exe_mod.link_libc = true;
 
     b.installArtifact(exe);
 
