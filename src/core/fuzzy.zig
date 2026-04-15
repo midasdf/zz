@@ -79,7 +79,7 @@ pub fn filter(
     candidates: []const []const u8,
     max_results: usize,
 ) ![]Match {
-    var matches: std.ArrayList(Match) = .{};
+    var matches: std.ArrayList(Match) = .empty;
     defer matches.deinit(allocator);
 
     for (candidates, 0..) |cand, i| {

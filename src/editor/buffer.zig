@@ -43,7 +43,7 @@ pub const PieceTable = struct {
 
     /// Create a new PieceTable from initial content (may be empty).
     pub fn init(allocator: std.mem.Allocator, content: []const u8) !PieceTable {
-        var pieces: std.ArrayList(Piece) = .{};
+        var pieces: std.ArrayList(Piece) = .empty;
         if (content.len > 0) {
             try pieces.append(allocator, .{
                 .source = .original,
@@ -53,13 +53,13 @@ pub const PieceTable = struct {
         }
         return .{
             .original = content,
-            .add_buf = .{},
+            .add_buf = .empty,
             .pieces = pieces,
             .total_len = @intCast(content.len),
             .allocator = allocator,
-            .undo_stack = .{},
-            .redo_stack = .{},
-            .line_offsets = .{},
+            .undo_stack = .empty,
+            .redo_stack = .empty,
+            .line_offsets = .empty,
         };
     }
 
@@ -150,7 +150,7 @@ pub const PieceTable = struct {
         // Don't compact if undo entries exist (they reference add_buf offsets)
         if (self.undo_stack.items.len > 0) return;
 
-        var new_add: std.ArrayList(u8) = .{};
+        var new_add: std.ArrayList(u8) = .empty;
         for (self.pieces.items) |*piece| {
             if (piece.source == .add) {
                 const content = self.add_buf.items[piece.start..][0..piece.len];
@@ -296,7 +296,7 @@ pub const PieceTable = struct {
         try self.pushUndo();
 
         const end = pos + len;
-        var new_pieces: std.ArrayList(Piece) = .{};
+        var new_pieces: std.ArrayList(Piece) = .empty;
         errdefer new_pieces.deinit(self.allocator);
 
         var offset: u32 = 0;
@@ -461,7 +461,7 @@ pub const PieceTable = struct {
 // =============================================================================
 
 fn expectContent(buf: *const PieceTable, expected: []const u8) !void {
-    var out: std.ArrayList(u8) = .{};
+    var out: std.ArrayList(u8) = .empty;
     defer out.deinit(std.testing.allocator);
     try buf.writeAll(out.writer(std.testing.allocator));
     try std.testing.expectEqualStrings(expected, out.items);

@@ -9,7 +9,7 @@ pub const TabManager = struct {
 
     pub fn init(allocator: std.mem.Allocator) TabManager {
         return .{
-            .tabs = .{},
+            .tabs = .empty,
             .active = 0,
             .allocator = allocator,
         };

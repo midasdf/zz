@@ -36,7 +36,7 @@ pub const CursorState = struct {
 
     /// Create a CursorState with a single cursor at position 0.
     pub fn init(allocator: std.mem.Allocator) !CursorState {
-        var cursors: std.ArrayList(Selection) = .{};
+        var cursors: std.ArrayList(Selection) = .empty;
         try cursors.append(allocator, .{ .anchor = 0, .head = 0 });
         return .{ .cursors = cursors, .desired_col = null, .allocator = allocator };
     }

@@ -1176,7 +1176,7 @@ pub const LspClient = struct {
                 };
 
                 const owned_uri = self.allocator.dupe(u8, uri_str) catch continue;
-                var edit_list: std.ArrayList(FormattingEdit) = .{};
+                var edit_list: std.ArrayList(FormattingEdit) = .empty;
 
                 for (edits_arr) |edit_val| {
                     const edit = switch (edit_val) {
@@ -1230,7 +1230,7 @@ pub const LspClient = struct {
             };
 
             const owned_title = self.allocator.dupe(u8, title_str) catch continue;
-            var edit_list: std.ArrayList(FormattingEdit) = .{};
+            var edit_list: std.ArrayList(FormattingEdit) = .empty;
             var edit_uri: ?[]u8 = null;
 
             // Parse workspace edit if present

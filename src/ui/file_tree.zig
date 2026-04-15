@@ -196,7 +196,7 @@ pub const FileTree = struct {
             name: []u8,
             is_dir: bool,
         };
-        var items: std.ArrayList(DirItem) = .{};
+        var items: std.ArrayList(DirItem) = .empty;
         defer {
             for (items.items) |item| self.allocator.free(item.name);
             items.deinit(self.allocator);
@@ -311,7 +311,7 @@ pub const FileTree = struct {
             name: []u8,
             is_dir: bool,
         };
-        var items: std.ArrayList(DirItem) = .{};
+        var items: std.ArrayList(DirItem) = .empty;
         defer {
             for (items.items) |item| self.allocator.free(item.name);
             items.deinit(self.allocator);
@@ -716,7 +716,7 @@ pub const FileTree = struct {
         };
 
         // Record expanded subdirectory paths before collapsing
-        var expanded_paths: std.ArrayListUnmanaged([]u8) = .{};
+        var expanded_paths: std.ArrayListUnmanaged([]u8) = .empty;
         defer {
             for (expanded_paths.items) |p| self.allocator.free(p);
             expanded_paths.deinit(self.allocator);
