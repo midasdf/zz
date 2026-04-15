@@ -225,14 +225,14 @@ pub const EditorView = struct {
     status_btn_gear_w: u32 = 0, // pixel width of settings gear
     status_bar_y: u32 = 0, // pixel y of status bar top
 
-    pub fn init(allocator: std.mem.Allocator, content: []const u8) !EditorView {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, content: []const u8) !EditorView {
         var buffer = try PieceTable.init(allocator, content);
         errdefer buffer.deinit();
         var cursor = try CursorState.init(allocator);
         errdefer cursor.deinit();
         const dirty = try allocator.alloc(bool, 1);
         @memset(dirty, true);
-        var highlighter = Highlighter.init(allocator);
+        var highlighter = Highlighter.init(allocator, io);
         errdefer highlighter.deinit();
 
         return .{

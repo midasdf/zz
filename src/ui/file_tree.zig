@@ -27,6 +27,7 @@ pub const FileTree = struct {
     visible: bool,
     width: u32,
     allocator: std.mem.Allocator,
+    io: std.Io,
     root_path: []const u8,
     active_path: ?[]const u8, // Currently open file (for highlighting)
     hover_entry: ?usize = null, // Entry under mouse cursor (for hover highlight)
@@ -143,14 +144,15 @@ pub const FileTree = struct {
         ".cache",
     };
 
-    pub fn init(allocator: std.mem.Allocator, root_path: []const u8) FileTree {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, root_path: []const u8) FileTree {
         return .{
-            .entries = .{},
+            .entries = .empty,
             .selected = 0,
             .scroll_offset = 0,
             .visible = false,
             .width = 220,
             .allocator = allocator,
+            .io = io,
             .root_path = root_path,
             .active_path = null,
         };
@@ -188,8 +190,8 @@ pub const FileTree = struct {
     }
 
     fn scanDir(self: *FileTree, dir_path: []const u8, depth: u16) !void {
-        var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch return;
-        defer dir.close();
+        var dir = std.Io.Dir.cwd().openDir(self.io, dir_path, .{ .iterate = true }) catch return;
+        defer dir.close(self.io);
 
         // Collect entries first for sorting
         const DirItem = struct {
@@ -203,7 +205,7 @@ pub const FileTree = struct {
         }
 
         var iter = dir.iterate();
-        while (try iter.next()) |entry| {
+        while (try iter.next(self.io)) |entry| {
             // Skip hidden files/dirs
             if (entry.name[0] == '.') continue;
 
@@ -242,7 +244,7 @@ pub const FileTree = struct {
             var has_children = false;
             if (item.is_dir) {
                 // Quick check if directory has children
-                var sub = std.fs.cwd().openDir(rel_path, .{ .iterate = true }) catch {
+                var sub = std.Io.Dir.cwd().openDir(self.io, rel_path, .{ .iterate = true }) catch {
                     has_children = false;
                     try self.entries.append(self.allocator, .{
                         .name = entry_name,
@@ -254,9 +256,9 @@ pub const FileTree = struct {
                     });
                     continue;
                 };
-                defer sub.close();
+                defer sub.close(self.io);
                 var sub_iter = sub.iterate();
-                if (try sub_iter.next()) |_| {
+                if (try sub_iter.next(self.io)) |_| {
                     has_children = true;
                 }
             }
@@ -304,8 +306,8 @@ pub const FileTree = struct {
         const child_depth = entry.depth + 1;
 
         // Scan directory
-        var dir = std.fs.cwd().openDir(parent_path, .{ .iterate = true }) catch return;
-        defer dir.close();
+        var dir = std.Io.Dir.cwd().openDir(self.io, parent_path, .{ .iterate = true }) catch return;
+        defer dir.close(self.io);
 
         const DirItem = struct {
             name: []u8,
@@ -318,7 +320,7 @@ pub const FileTree = struct {
         }
 
         var iter = dir.iterate();
-        while (try iter.next()) |e| {
+        while (try iter.next(self.io)) |e| {
             if (e.name[0] == '.') continue;
             if (self.shouldSkip(e.name)) continue;
 
@@ -349,7 +351,7 @@ pub const FileTree = struct {
 
             var has_children = false;
             if (item.is_dir) {
-                var sub = std.fs.cwd().openDir(rel_path, .{ .iterate = true }) catch {
+                var sub = std.Io.Dir.cwd().openDir(self.io, rel_path, .{ .iterate = true }) catch {
                     try self.entries.insert(self.allocator, insert_pos, .{
                         .name = entry_name,
                         .path = rel_path,
@@ -361,9 +363,9 @@ pub const FileTree = struct {
                     insert_pos += 1;
                     continue;
                 };
-                defer sub.close();
+                defer sub.close(self.io);
                 var sub_iter = sub.iterate();
-                if (try sub_iter.next()) |_| {
+                if (try sub_iter.next(self.io)) |_| {
                     has_children = true;
                 }
             }
@@ -753,8 +755,8 @@ pub const FileTree = struct {
         const full_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ dir_path, name });
         defer self.allocator.free(full_path);
 
-        const file = try std.fs.cwd().createFile(full_path, .{ .exclusive = true });
-        file.close();
+        const file = try std.Io.Dir.cwd().createFile(self.io, full_path, .{ .exclusive = true });
+        file.close(self.io);
 
         try self.refreshDirectory(dir_path);
     }
@@ -763,7 +765,7 @@ pub const FileTree = struct {
         const full_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ dir_path, name });
         defer self.allocator.free(full_path);
 
-        try std.fs.cwd().makeDir(full_path);
+        try std.Io.Dir.cwd().createDirPath(self.io, full_path);
         try self.refreshDirectory(dir_path);
     }
 
@@ -773,15 +775,16 @@ pub const FileTree = struct {
         const new_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ parent, new_name });
         defer self.allocator.free(new_path);
 
-        try std.fs.cwd().rename(old_path, new_path);
+        const cwd = std.Io.Dir.cwd();
+        try cwd.rename(old_path, cwd, new_path, self.io);
         try self.refreshDirectory(parent);
     }
 
     pub fn deleteEntry(self: *FileTree, path: []const u8, is_dir: bool) !void {
         if (is_dir) {
-            try std.fs.cwd().deleteTree(path);
+            try std.Io.Dir.cwd().deleteTree(self.io, path);
         } else {
-            try std.fs.cwd().deleteFile(path);
+            try std.Io.Dir.cwd().deleteFile(self.io, path);
         }
         const parent = std.fs.path.dirname(path) orelse ".";
         try self.refreshDirectory(parent);

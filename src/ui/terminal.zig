@@ -46,12 +46,12 @@ pub const Terminal = struct {
 
     allocator: Allocator,
 
-    pub fn init(allocator: Allocator) !Terminal {
+    pub fn init(allocator: Allocator, env_map: *std.process.Environ.Map) !Terminal {
         var self = Terminal{
             .allocator = allocator,
         };
         // Check ZZ_TERMINAL env var, default to "st"
-        if (std.posix.getenv("ZZ_TERMINAL")) |env_term| {
+        if (env_map.get("ZZ_TERMINAL")) |env_term| {
             const len: u8 = @intCast(@min(env_term.len, 128));
             @memcpy(self.terminal_cmd[0..len], env_term[0..len]);
             self.terminal_cmd_len = len;

@@ -23,9 +23,7 @@ const lsp_ops = @import("core/lsp_ops.zig");
 const popups = @import("ui/popups.zig");
 
 fn logError(context: []const u8, err: anyerror) void {
-    var buf: [128]u8 = undefined;
-    const msg = std.fmt.bufPrint(&buf, "zz: {s}: {s}\n", .{ context, @errorName(err) }) catch return;
-    _ = std.posix.write(std.posix.STDERR_FILENO, msg) catch {}; // last-resort log, nowhere to report
+    std.debug.print("zz: {s}: {s}\n", .{ context, @errorName(err) });
 }
 
 const EditorMode = enum {
@@ -120,7 +118,7 @@ pub fn main(init: std.process.Init) !void {
     defer font.deinit();
 
     // Tab manager
-    var tab_mgr = TabManager.init(allocator);
+    var tab_mgr = TabManager.init(allocator, io);
     defer tab_mgr.deinit();
 
     // Compute tab bar height
@@ -133,7 +131,7 @@ pub fn main(init: std.process.Init) !void {
     try initial_view.updateViewport(win.width, win.height, &font);
 
     // Git integration
-    var git_info = GitInfo.init(allocator);
+    var git_info = GitInfo.init(allocator, io);
     defer git_info.deinit();
     git_info.readBranch();
     if (file_path) |fp| {
@@ -146,25 +144,26 @@ pub fn main(init: std.process.Init) !void {
     defer pane_mgr.deinit();
 
     // File tree sidebar (open by default like Zed)
-    var file_tree = FileTree.init(allocator, ".");
+    var file_tree = FileTree.init(allocator, io, ".");
     defer file_tree.deinit();
     file_tree.visible = true;
     file_tree.populate() catch |err| logError("file tree populate", err);
 
     // Terminal panel (XEmbed: embeds a real terminal emulator)
-    var terminal = try Terminal.init(allocator);
+    var terminal = try Terminal.init(allocator, init.environ_map);
     defer terminal.deinit();
     terminal.setup(win.getConnection(), win.getWindowId());
 
     // LSP client
-    var lsp_client = lsp.LspClient.init(allocator);
+    var lsp_client = lsp.LspClient.init(allocator, io);
     defer lsp_client.deinit();
 
     // Start LSP server if applicable
     if (initial_view.file_path) |path| {
         if (lsp.serverCommand(path)) |cmd| {
             var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-            const cwd_path = std.fs.cwd().realpath(".", &cwd_buf) catch null;
+            const cwd_len = std.process.currentPath(io, &cwd_buf) catch 0;
+            const cwd_path: ?[]const u8 = if (cwd_len > 0) cwd_buf[0..cwd_len] else null;
             if (cwd_path) |root| {
                 lsp_client.start(cmd, root) catch |err| logError("LSP start", err);
                 // Send didOpen
