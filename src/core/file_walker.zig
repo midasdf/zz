@@ -4,6 +4,7 @@ const std = @import("std");
 /// Skips .git/, node_modules/, zig-cache/, .zig-cache/, zig-out/
 /// Respects .gitignore at root level (simple glob patterns only).
 pub fn walkFiles(
+    io: std.Io,
     allocator: std.mem.Allocator,
     root_path: []const u8,
     max_files: usize,
@@ -19,10 +20,10 @@ pub fn walkFiles(
     defer ignore_patterns.deinit(allocator);
 
     // Read .gitignore from root_path directory
-    var root_dir = std.fs.cwd().openDir(root_path, .{}) catch null;
+    var root_dir = std.Io.Dir.cwd().openDir(io, root_path, .{}) catch null;
     const gitignore = if (root_dir) |*rd| blk: {
-        defer rd.close();
-        break :blk rd.readFileAlloc(allocator, ".gitignore", 64 * 1024) catch null;
+        defer rd.close(io);
+        break :blk rd.readFileAlloc(io, ".gitignore", allocator, .limited(64 * 1024)) catch null;
     } else null;
     if (gitignore) |content| {
         defer allocator.free(content);
@@ -40,24 +41,25 @@ pub fn walkFiles(
     defer for (ignore_patterns.items) |p| allocator.free(p);
 
     // Walk directory
-    var dir = std.fs.cwd().openDir(root_path, .{ .iterate = true }) catch return try files.toOwnedSlice(allocator);
-    defer dir.close();
+    var dir = std.Io.Dir.cwd().openDir(io, root_path, .{ .iterate = true }) catch return try files.toOwnedSlice(allocator);
+    defer dir.close(io);
 
-    try walkDir(allocator, dir, "", &files, ignore_patterns.items, max_files);
+    try walkDir(io, allocator, dir, "", &files, ignore_patterns.items, max_files);
 
     return try files.toOwnedSlice(allocator);
 }
 
 fn walkDir(
+    io: std.Io,
     allocator: std.mem.Allocator,
-    dir: std.fs.Dir,
+    dir: std.Io.Dir,
     prefix: []const u8,
     files: *std.ArrayList([]const u8),
     ignore_patterns: []const []const u8,
     max_files: usize,
 ) !void {
     var iter = dir.iterate();
-    while (try iter.next()) |entry| {
+    while (try iter.next(io)) |entry| {
         if (files.items.len >= max_files) return;
 
         const name = entry.name;
@@ -83,12 +85,12 @@ fn walkDir(
         }
 
         if (entry.kind == .directory) {
-            var subdir = dir.openDir(name, .{ .iterate = true }) catch {
+            var subdir = dir.openDir(io, name, .{ .iterate = true }) catch {
                 allocator.free(rel_path);
                 continue;
             };
-            defer subdir.close();
-            walkDir(allocator, subdir, rel_path, files, ignore_patterns, max_files) catch {};
+            defer subdir.close(io);
+            walkDir(io, allocator, subdir, rel_path, files, ignore_patterns, max_files) catch {};
             allocator.free(rel_path);
         } else if (entry.kind == .file) {
             try files.append(allocator, rel_path);

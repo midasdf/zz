@@ -1,5 +1,4 @@
 const std = @import("std");
-const posix = std.posix;
 
 // ── Data types ──────────────────────────────────────────────────────
 
@@ -270,7 +269,7 @@ pub const LspClient = struct {
         self.msg_buf.deinit(self.allocator);
     }
 
-    pub fn getStdoutFd(self: *const LspClient) ?posix.fd_t {
+    pub fn getStdoutFd(self: *const LspClient) ?std.posix.fd_t {
         if (self.process) |proc| {
             if (proc.stdout) |stdout| {
                 return stdout.handle;

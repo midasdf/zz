@@ -164,16 +164,17 @@ pub const Terminal = struct {
         {
             var dbg: [256]u8 = undefined;
             const msg = std.fmt.bufPrint(&dbg, "zz: spawn terminal: {s} {s} {s} (win={d} {d}x{d}+{d}+{d})\n", .{ cmd_name, embed_flag, wid_str, self.child_window, self.width, self.height, self.x, self.y }) catch "";
-            _ = posix.write(posix.STDERR_FILENO, msg) catch {};
+            _ = std.c.write(posix.STDERR_FILENO, msg.ptr, msg.len);
         }
 
-        const fork_result = posix.fork() catch return;
+        const fork_result = std.c.fork();
+        if (fork_result < 0) return;
         if (fork_result == 0) {
             // Child process: exec the terminal emulator
-            _ = posix.execvpeZ(cmd_z, &argv, @ptrCast(std.c.environ)) catch {};
-            posix.exit(1);
+            _ = std.c.execve(cmd_z, &argv, @ptrCast(std.c.environ));
+            std.c.exit(1);
         }
-        self.pid = fork_result;
+        self.pid = @intCast(fork_result);
     }
 
     pub fn setFocus(self: *Terminal) void {
@@ -250,8 +251,9 @@ pub const Terminal = struct {
     /// Check if child process is still alive; clean up zombie if not
     pub fn checkChild(self: *Terminal) void {
         const pid = self.pid orelse return;
-        const result = posix.waitpid(pid, posix.W{ .NOHANG = true });
-        if (result.pid != 0) {
+        var status: c_int = 0;
+        const ret = std.c.waitpid(pid, &status, 1); // WNOHANG = 1
+        if (ret != 0) {
             // Child exited
             self.pid = null;
         }
@@ -261,8 +263,9 @@ pub const Terminal = struct {
 
     fn killChild(self: *Terminal) void {
         if (self.pid) |pid| {
-            posix.kill(pid, posix.SIG.TERM) catch {};
-            _ = posix.waitpid(pid, 0);
+            _ = std.c.kill(pid, std.c.SIG.TERM);
+            var status: c_int = 0;
+            _ = std.c.waitpid(pid, &status, 0);
             self.pid = null;
         }
     }

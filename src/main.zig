@@ -26,6 +26,13 @@ fn logError(context: []const u8, err: anyerror) void {
     std.debug.print("zz: {s}: {s}\n", .{ context, @errorName(err) });
 }
 
+/// Monotonic millisecond timestamp (replaces removed std.time.milliTimestamp).
+fn milliTimestamp() i64 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts);
+    return @as(i64, ts.sec) * 1000 + @as(i64, @intCast(@divTrunc(ts.nsec, 1_000_000)));
+}
+
 const EditorMode = enum {
     normal,
     command_palette,
@@ -211,33 +218,37 @@ pub fn main(init: std.process.Init) !void {
     var lsp_needs_sync = false;
 
     // Epoll setup
-    const epoll_fd = try std.posix.epoll_create1(std.os.linux.EPOLL.CLOEXEC);
-    defer std.posix.close(epoll_fd);
+    const EPOLL_CLOEXEC: c_uint = 0o02000000;
+    const EPOLL_CTL_ADD: c_uint = 1;
+    const EPOLLIN: u32 = 0x001;
+    const epoll_fd = std.c.epoll_create1(EPOLL_CLOEXEC);
+    if (epoll_fd < 0) return error.EpollCreateFailed;
+    defer _ = std.c.close(epoll_fd);
 
     // Register xcb fd
     const xcb_fd = win.getFd();
     var xcb_ev = std.os.linux.epoll_event{
-        .events = std.os.linux.EPOLL.IN,
+        .events = EPOLLIN,
         .data = .{ .u32 = 0 },
     };
-    try std.posix.epoll_ctl(epoll_fd, std.os.linux.EPOLL.CTL_ADD, xcb_fd, &xcb_ev);
+    if (std.c.epoll_ctl(epoll_fd, EPOLL_CTL_ADD, xcb_fd, &xcb_ev) < 0) return error.EpollCtlFailed;
 
     // Timer for cursor blink (500ms)
     const timer_fd = try createTimerFd(500_000_000);
-    defer std.posix.close(timer_fd);
+    defer _ = std.c.close(timer_fd);
     var timer_ev = std.os.linux.epoll_event{
-        .events = std.os.linux.EPOLL.IN,
+        .events = EPOLLIN,
         .data = .{ .u32 = 1 },
     };
-    try std.posix.epoll_ctl(epoll_fd, std.os.linux.EPOLL.CTL_ADD, timer_fd, &timer_ev);
+    if (std.c.epoll_ctl(epoll_fd, EPOLL_CTL_ADD, timer_fd, &timer_ev) < 0) return error.EpollCtlFailed;
 
     // Register LSP stdout fd with epoll
     if (lsp_client.getStdoutFd()) |lsp_fd| {
         var lsp_ev = std.os.linux.epoll_event{
-            .events = std.os.linux.EPOLL.IN,
+            .events = EPOLLIN,
             .data = .{ .u32 = 2 },
         };
-        std.posix.epoll_ctl(epoll_fd, std.os.linux.EPOLL.CTL_ADD, lsp_fd, &lsp_ev) catch {}; // non-fatal: LSP poll optional
+        _ = std.c.epoll_ctl(epoll_fd, EPOLL_CTL_ADD, lsp_fd, &lsp_ev); // non-fatal: LSP poll optional
     }
 
     var running = true;
@@ -292,7 +303,9 @@ pub fn main(init: std.process.Init) !void {
 
     while (running) {
         var events: [16]std.os.linux.epoll_event = undefined;
-        const n = std.posix.epoll_wait(epoll_fd, &events, -1);
+        const n_raw = std.c.epoll_wait(epoll_fd, &events, events.len, -1);
+        if (n_raw < 0) continue;
+        const n: usize = @intCast(n_raw);
 
         for (events[0..n]) |ev| {
             switch (ev.data.u32) {
@@ -383,14 +396,14 @@ pub fn main(init: std.process.Init) !void {
                                         if (file_tree.inline_input) |*input| {
                                             if (input.validate()) |err_msg| {
                                                 status_message = err_msg;
-                                                status_message_time = std.time.milliTimestamp();
+                                                status_message_time = milliTimestamp();
                                             } else {
                                                 const name = input.content();
                                                 switch (input.mode) {
                                                     .new_file => {
                                                         file_tree.createNewFile(input.target_dir, name) catch |err| {
                                                             status_message = @errorName(err);
-                                                            status_message_time = std.time.milliTimestamp();
+                                                            status_message_time = milliTimestamp();
                                                             markAllPanesDirty(&pane_mgr);
                                                             continue;
                                                         };
@@ -404,7 +417,7 @@ pub fn main(init: std.process.Init) !void {
                                                     .new_folder => {
                                                         file_tree.createNewFolder(input.target_dir, name) catch |err| {
                                                             status_message = @errorName(err);
-                                                            status_message_time = std.time.milliTimestamp();
+                                                            status_message_time = milliTimestamp();
                                                         };
                                                     },
                                                     .rename_file => {
@@ -420,7 +433,7 @@ pub fn main(init: std.process.Init) !void {
                                                                 const had_tab = tab_mgr.findByPath(old_path_dupe) != null;
                                                                 file_tree.renameEntry(old_path_dupe, name) catch |err| {
                                                                     status_message = @errorName(err);
-                                                                    status_message_time = std.time.milliTimestamp();
+                                                                    status_message_time = milliTimestamp();
                                                                     markAllPanesDirty(&pane_mgr);
                                                                     continue;
                                                                 };
@@ -473,7 +486,7 @@ pub fn main(init: std.process.Init) !void {
                                     } else if (ke.keysym == 0x0079) { // 'y'
                                         file_tree.deleteEntry(confirm_dialog.target_path, confirm_dialog.target_is_dir) catch |err| {
                                             status_message = @errorName(err);
-                                            status_message_time = std.time.milliTimestamp();
+                                            status_message_time = milliTimestamp();
                                         };
                                         closeTabsForPath(&tab_mgr, confirm_dialog.target_path, confirm_dialog.target_is_dir);
                                         syncPaneToActiveTab(&pane_mgr, &tab_mgr);
@@ -483,7 +496,7 @@ pub fn main(init: std.process.Init) !void {
                                         if (confirm_dialog.selected_yes) {
                                             file_tree.deleteEntry(confirm_dialog.target_path, confirm_dialog.target_is_dir) catch |err| {
                                                 status_message = @errorName(err);
-                                                status_message_time = std.time.milliTimestamp();
+                                                status_message_time = milliTimestamp();
                                             };
                                             closeTabsForPath(&tab_mgr, confirm_dialog.target_path, confirm_dialog.target_is_dir);
                                             syncPaneToActiveTab(&pane_mgr, &tab_mgr);
@@ -497,7 +510,7 @@ pub fn main(init: std.process.Init) !void {
                                     continue;
                                 }
                                 if (mode != .normal) {
-                                    handleOverlayKey(&mode, &overlay, &tab_mgr, &pane_mgr, ke, allocator, &file_list, &filtered_display, &search_results, &lsp_client, &font, &git_info, &replace_buf, &replace_len, &replace_field_active, &lsp_needs_sync);
+                                    handleOverlayKey(io, &mode, &overlay, &tab_mgr, &pane_mgr, ke, allocator, &file_list, &filtered_display, &search_results, &lsp_client, &font, &git_info, &replace_buf, &replace_len, &replace_field_active, &lsp_needs_sync);
                                 } else {
                                     const mod = keymap.modFromWindow(ke.modifiers);
                                     // Check for toggle_terminal first (Ctrl+`)
@@ -512,11 +525,11 @@ pub fn main(init: std.process.Init) !void {
                                         } else {
                                         switch (action) {
                                             .command_palette => openCommandPalette(&mode, &overlay, &filtered_display, allocator),
-                                            .finder_files => openFileFinder(&mode, &overlay, allocator, &file_list, &filtered_display),
+                                            .finder_files => openFileFinder(io, &mode, &overlay, allocator, &file_list, &filtered_display),
                                             .find => openSearch(&mode, &overlay),
                                             .find_replace => openFindReplace(&mode, &overlay, &replace_buf, &replace_len, &replace_field_active),
                                             .goto_line => openGotoLine(&mode, &overlay),
-                                            .find_in_project => openProjectSearch(&mode, &overlay, allocator, &file_list, &filtered_display, &search_results),
+                                            .find_in_project => openProjectSearch(io, &mode, &overlay, allocator, &file_list, &filtered_display, &search_results),
                                             .goto_symbol => openGotoSymbol(&mode, &overlay, editor, &lsp_client, &filtered_display, allocator),
                                             .rename_symbol => openRename(&mode, &overlay, editor),
                                             .code_action => openCodeAction(&mode, &overlay, editor, &lsp_client, &filtered_display, allocator),
@@ -646,7 +659,7 @@ pub fn main(init: std.process.Init) !void {
                                         }
                                     } else {
                                         overlay.appendText(te.slice());
-                                        updateOverlayResults(&mode, &overlay, allocator, file_list, &filtered_display, &search_results, &lsp_client);
+                                        updateOverlayResults(io, &mode, &overlay, allocator, file_list, &filtered_display, &search_results, &lsp_client);
                                     }
                                     editor.markAllDirty();
                                 } else if (terminal.focused) {
@@ -790,7 +803,7 @@ pub fn main(init: std.process.Init) !void {
                                             const pos = active.pixelToPosition(me.x, me.y, &font);
 
                                             // Double/triple-click detection
-                                            const now = std.time.milliTimestamp();
+                                            const now = milliTimestamp();
                                             const dt = now - last_click_time;
                                             const dx = if (me.x > last_click_x) me.x - last_click_x else last_click_x - me.x;
                                             const dy = if (me.y > last_click_y) me.y - last_click_y else last_click_y - me.y;
@@ -996,7 +1009,7 @@ pub fn main(init: std.process.Init) !void {
                 1 => { // cursor blink timer
                     const editor = pane_mgr.active_leaf;
                     var buf: [8]u8 = undefined;
-                    _ = std.posix.read(timer_fd, &buf) catch {}; // non-fatal: drain timer fd
+                    _ = std.c.read(timer_fd, &buf, buf.len); // non-fatal: drain timer fd
                     editor.cursor_visible = !editor.cursor_visible;
                     const lc = editor.buffer.offsetToLineCol(editor.cursor.primary().head);
                     if (lc.line >= editor.scroll_line) {
@@ -1393,10 +1406,15 @@ fn executeMenuAction(
             const idx = ctx_menu_ptr.tree_entry_index orelse return;
             if (idx >= file_tree.entries.items.len) return;
             const entry = &file_tree.entries.items[idx];
-            if (std.fs.cwd().realpathAlloc(allocator, entry.path)) |abs_path| {
-                win.setClipboard(@constCast(abs_path));
-                allocator.free(abs_path);
-            } else |_| {}
+            {
+                var rp_path_z: [4096]u8 = undefined;
+                var rp_resolved: [4096]u8 = undefined;
+                if (std.fmt.bufPrintZ(&rp_path_z, "{s}", .{entry.path})) |pz| {
+                    if (std.c.realpath(pz.ptr, &rp_resolved)) |rp| {
+                        win.setClipboard(@constCast(std.mem.span(rp)));
+                    }
+                } else |_| {}
+            }
         },
         .tree_copy_relative_path => {
             const idx = ctx_menu_ptr.tree_entry_index orelse return;
@@ -1780,17 +1798,20 @@ fn saveFile(editor: *EditorView) void {
 
     // Atomic save: write to temp, rename
     var tmp_buf: [512]u8 = undefined;
-    const tmp_path = std.fmt.bufPrint(&tmp_buf, "{s}.zz-tmp", .{path}) catch return;
-
-    const file = std.fs.cwd().createFile(tmp_path, .{}) catch return;
-    file.writeAll(trimmed) catch {
-        file.close();
-        std.fs.cwd().deleteFile(tmp_path) catch {}; // non-fatal: temp file cleanup
+    // Write via C stdio: open(O_WRONLY|O_CREAT|O_TRUNC=0x241, mode 0644=0o644)
+    const tmp_path_z = std.fmt.bufPrintZ(&tmp_buf, "{s}.zz-tmp", .{path}) catch return;
+    const wfd = std.c.open(tmp_path_z.ptr, @as(std.c.O, @bitCast(@as(u32, 0x241))), @as(std.c.mode_t, 0o644));
+    if (wfd < 0) return;
+    const written = std.c.write(wfd, trimmed.ptr, trimmed.len);
+    _ = std.c.close(wfd);
+    if (written < 0 or @as(usize, @intCast(written)) != trimmed.len) {
+        _ = std.c.unlink(tmp_path_z.ptr);
         return;
-    };
-    file.close();
-
-    std.fs.cwd().rename(tmp_path, path) catch return;
+    }
+    // Atomic rename
+    var path_z_buf: [512]u8 = undefined;
+    const path_z = std.fmt.bufPrintZ(&path_z_buf, "{s}", .{path}) catch return;
+    if (std.c.rename(tmp_path_z.ptr, path_z.ptr) != 0) return;
 
     // If trimming changed the content, reload the buffer to reflect trimmed state
     if (trimmed.len != content.len) {
@@ -1926,7 +1947,7 @@ fn renderFrame(
 
     // Status message (3 second display)
     if (status_msg) |msg| {
-        const elapsed = std.time.milliTimestamp() - status_time;
+        const elapsed = milliTimestamp() - status_time;
         if (elapsed < 3000) {
             const warn_color = render_mod.Color.fromHex(0xfab387);
             const bar_y = renderer.height -| font.cell_height;
@@ -1964,14 +1985,17 @@ fn updateImeCursorPosition(editor: *const EditorView, win: *Window, font: *const
     }
 }
 
-fn createTimerFd(interval_ns: u64) !std.posix.fd_t {
-    const fd = try std.posix.timerfd_create(.MONOTONIC, .{ .NONBLOCK = true, .CLOEXEC = true });
-    const ts = std.os.linux.timespec{
+fn createTimerFd(interval_ns: u64) !std.c.fd_t {
+    const TFD_NONBLOCK: c_int = 0o00004000;
+    const TFD_CLOEXEC: c_int = 0o02000000;
+    const fd = std.c.timerfd_create(.MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
+    if (fd < 0) return error.TimerFdCreateFailed;
+    const ts = std.c.timespec{
         .sec = @intCast(interval_ns / 1_000_000_000),
         .nsec = @intCast(interval_ns % 1_000_000_000),
     };
-    const spec = std.os.linux.itimerspec{ .it_interval = ts, .it_value = ts };
-    try std.posix.timerfd_settime(fd, .{}, &spec, null);
+    const spec = std.c.itimerspec{ .it_interval = ts, .it_value = ts };
+    if (std.c.timerfd_settime(fd, 0, &spec, null) < 0) return error.TimerFdSetTimeFailed;
     return fd;
 }
 
@@ -1988,10 +2012,10 @@ fn openCommandPalette(mode: *EditorMode, overlay: *Overlay, filtered_display: *s
     overlay.items = filtered_display.items;
 }
 
-fn openFileFinder(mode: *EditorMode, overlay: *Overlay, allocator: std.mem.Allocator, file_list: *?[][]const u8, filtered_display: *std.ArrayList([]const u8)) void {
+fn openFileFinder(io: std.Io, mode: *EditorMode, overlay: *Overlay, allocator: std.mem.Allocator, file_list: *?[][]const u8, filtered_display: *std.ArrayList([]const u8)) void {
     // Walk files if not cached
     if (file_list.* == null) {
-        file_list.* = file_walker.walkFiles(allocator, ".", 5000) catch null;
+        file_list.* = file_walker.walkFiles(io, allocator, ".", 5000) catch null;
     }
     mode.* = .file_finder;
     overlay.open("Open File");
@@ -2126,6 +2150,7 @@ fn openGotoReferences(
 }
 
 fn openProjectSearch(
+    io: std.Io,
     mode: *EditorMode,
     overlay: *Overlay,
     allocator: std.mem.Allocator,
@@ -2135,7 +2160,7 @@ fn openProjectSearch(
 ) void {
     // Walk files if not cached
     if (file_list.* == null) {
-        file_list.* = file_walker.walkFiles(allocator, ".", 5000) catch null;
+        file_list.* = file_walker.walkFiles(io, allocator, ".", 5000) catch null;
     }
     mode.* = .project_search;
     overlay.open("Search in Project");
@@ -2149,6 +2174,7 @@ fn openProjectSearch(
 // ── Overlay keyboard handler ──────────────────────────────────────
 
 fn handleOverlayKey(
+    io: std.Io,
     mode: *EditorMode,
     overlay: *Overlay,
     tab_mgr: *TabManager,
@@ -2348,7 +2374,7 @@ fn handleOverlayKey(
             if (replace_len.* > 0) replace_len.* -= 1;
         } else {
             overlay.backspace();
-            updateOverlayResults(mode, overlay, allocator, file_list.*, filtered_display, search_results, lsp_client);
+            updateOverlayResults(io, mode, overlay, allocator, file_list.*, filtered_display, search_results, lsp_client);
         }
         editor.markAllDirty();
         return;
@@ -2358,6 +2384,7 @@ fn handleOverlayKey(
 // ── Update overlay results on input change ────────────────────────
 
 fn updateOverlayResults(
+    io: std.Io,
     mode: *const EditorMode,
     overlay: *Overlay,
     allocator: std.mem.Allocator,
@@ -2401,7 +2428,7 @@ fn updateOverlayResults(
 
             if (query.len >= 2) {
                 if (file_list) |files| {
-                    search_ops.searchInFiles(allocator, query, files, 100, search_results);
+                    search_ops.searchInFiles(io, allocator, query, files, 100, search_results);
                     for (search_results.items) |r| {
                         filtered_display.append(allocator, r) catch {};
                     }
@@ -2440,7 +2467,27 @@ fn openFileInTab(tab_mgr: *TabManager, allocator: std.mem.Allocator, path: []con
     }
 
     // Read the file
-    const new_content = std.fs.cwd().readFileAlloc(allocator, path, 100 * 1024 * 1024) catch return;
+    // Read file via C open/lseek/read since no io handle available here
+    const new_content = blk: {
+        var path_z_buf: [4096]u8 = undefined;
+        const path_z = std.fmt.bufPrintZ(&path_z_buf, "{s}", .{path}) catch return;
+        const fd = std.c.open(path_z.ptr, @as(std.c.O, @bitCast(@as(u32, 0)))); // O_RDONLY=0
+        if (fd < 0) return;
+        defer _ = std.c.close(fd);
+        // Get size via lseek: SEEK_END=2, SEEK_SET=0
+        const sz = std.c.lseek(fd, 0, 2);
+        if (sz < 0 or sz > 100 * 1024 * 1024) return;
+        _ = std.c.lseek(fd, 0, 0); // rewind
+        const buf = allocator.alloc(u8, @intCast(sz)) catch return;
+        var total: usize = 0;
+        while (total < buf.len) {
+            const n = std.c.read(fd, buf.ptr + total, buf.len - total);
+            if (n <= 0) break;
+            total += @intCast(n);
+        }
+        if (total != buf.len) { allocator.free(buf); return; }
+        break :blk buf;
+    };
 
     // Create a new tab — PieceTable references new_content as `original`
     const tab_bar_h = view_mod.tabBarHeight(font);
