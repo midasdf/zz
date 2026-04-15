@@ -1850,7 +1850,9 @@ test "jsonEscapedLen" {
 }
 
 test "init and deinit" {
-    var client = LspClient.init(std.testing.allocator);
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var client = LspClient.init(std.testing.allocator, threaded.io());
     defer client.deinit();
     try std.testing.expect(!client.initialized);
     try std.testing.expect(client.process == null);

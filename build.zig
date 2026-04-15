@@ -39,6 +39,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    buffer_test_mod.link_libc = true;
     const buffer_tests = b.addTest(.{ .root_module = buffer_test_mod });
     const run_buffer_tests = b.addRunArtifact(buffer_tests);
 
@@ -48,6 +49,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    cursor_test_mod.link_libc = true;
     const cursor_tests = b.addTest(.{ .root_module = cursor_test_mod });
     const run_cursor_tests = b.addRunArtifact(cursor_tests);
 
@@ -57,6 +59,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    lsp_test_mod.link_libc = true;
     const lsp_tests = b.addTest(.{ .root_module = lsp_test_mod });
     const run_lsp_tests = b.addRunArtifact(lsp_tests);
 
