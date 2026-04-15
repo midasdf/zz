@@ -8,14 +8,14 @@ pub fn walkFiles(
     root_path: []const u8,
     max_files: usize,
 ) ![][]const u8 {
-    var files: std.ArrayList([]const u8) = .{};
+    var files: std.ArrayList([]const u8) = .empty;
     errdefer {
         for (files.items) |f| allocator.free(f);
         files.deinit(allocator);
     }
 
     // Load .gitignore if present
-    var ignore_patterns: std.ArrayList([]const u8) = .{};
+    var ignore_patterns: std.ArrayList([]const u8) = .empty;
     defer ignore_patterns.deinit(allocator);
 
     // Read .gitignore from root_path directory

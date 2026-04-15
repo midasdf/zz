@@ -93,19 +93,12 @@ const file_tree_menu_items = [_]Overlay.MenuItem{
 
 const font_path = "/usr/share/fonts/PlemolJP/PlemolJPConsoleNF-Regular.ttf";
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer {
-        if (gpa.deinit() == .leak) {
-            const msg = "zz: memory leak detected\n";
-            _ = std.posix.write(std.posix.STDERR_FILENO, msg) catch 0;
-        }
-    }
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
 
     // Parse CLI args
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
 
     // Load file or start empty
     var content: []const u8 = "";
@@ -113,7 +106,7 @@ pub fn main() !void {
     var file_path: ?[]const u8 = null;
     if (args.len > 1) {
         file_path = args[1];
-        owned_content = std.fs.cwd().readFileAlloc(allocator, args[1], 100 * 1024 * 1024) catch null;
+        owned_content = std.Io.Dir.cwd().readFileAlloc(io, args[1], allocator, .limited(100 * 1024 * 1024)) catch null;
         if (owned_content) |c| content = c;
     }
     defer if (owned_content) |c| allocator.free(c);
@@ -194,9 +187,9 @@ pub fn main() !void {
     var replace_field_active: bool = false; // false=search field, true=replace field
     var file_list: ?[][]const u8 = null;
     defer if (file_list) |fl| file_walker.freeFiles(allocator, fl);
-    var filtered_display: std.ArrayList([]const u8) = .{};
+    var filtered_display: std.ArrayList([]const u8) = .empty;
     defer filtered_display.deinit(allocator);
-    var search_results: std.ArrayList([]u8) = .{};
+    var search_results: std.ArrayList([]u8) = .empty;
     defer {
         for (search_results.items) |r| allocator.free(r);
         search_results.deinit(allocator);
