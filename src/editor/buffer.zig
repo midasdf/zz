@@ -1,5 +1,12 @@
 const std = @import("std");
 
+/// Get monotonic nanosecond timestamp via clock_gettime (replaces removed std.time.nanoTimestamp).
+fn nanoTimestamp() i128 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts);
+    return @as(i128, ts.sec) * 1_000_000_000 + @as(i128, ts.nsec);
+}
+
 /// Append-only text buffer using the Piece Table data structure.
 /// Supports O(1) insert, O(log n) line lookup, and undo/redo with coalescing.
 pub const PieceTable = struct {
@@ -218,7 +225,7 @@ pub const PieceTable = struct {
 
         // Coalesce: single-char inserts at consecutive positions share one undo entry,
         // but break if more than 1 second has passed since the last edit
-        const now = std.time.nanoTimestamp();
+        const now = nanoTimestamp();
         const time_gap = now - self.last_edit_time;
         const time_threshold: i128 = 1_000_000_000; // 1 second in ns
         const is_coalesced = text.len == 1 and text[0] != '\n' and

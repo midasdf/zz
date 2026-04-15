@@ -1,6 +1,5 @@
 // zz/src/ui/terminal.zig — Embedded terminal panel using zt's PTY/VT/Term core
 const std = @import("std");
-const posix = std.posix;
 const linux = std.os.linux;
 const Allocator = std.mem.Allocator;
 
@@ -777,7 +776,7 @@ const TermGrid = struct {
 
 // ── Action Executor ────────────────────────────────────────────────
 
-fn executeAction(action: VtParser.VtAction, grid: *TermGrid, pty_fd: ?posix.fd_t) void {
+fn executeAction(action: VtParser.VtAction, grid: *TermGrid, pty_fd: ?std.c.fd_t) void {
     switch (action) {
         .print => |cp| grid.putChar(cp),
         .execute => |c| handleControl(c, grid),
@@ -864,7 +863,7 @@ fn handleEsc(esc: VtParser.EscData, grid: *TermGrid) void {
     }
 }
 
-fn handleCsi(csi: VtParser.CsiData, grid: *TermGrid, pty_fd: ?posix.fd_t) void {
+fn handleCsi(csi: VtParser.CsiData, grid: *TermGrid, pty_fd: ?std.c.fd_t) void {
     const p = csi.params;
     const pc = csi.param_count;
 
@@ -1027,10 +1026,10 @@ fn handleCsi(csi: VtParser.CsiData, grid: *TermGrid, pty_fd: ?posix.fd_t) void {
                     // CPR - Cursor Position Report: ESC [ row ; col R
                     var resp_buf: [32]u8 = undefined;
                     const resp = std.fmt.bufPrint(&resp_buf, "\x1b[{d};{d}R", .{ grid.cursor_y + 1, grid.cursor_x + 1 }) catch return;
-                    _ = posix.write(fd, resp) catch {};
+                    _ = std.c.write(fd, resp.ptr, resp.len);
                 } else if (mode == 5) {
                     // Status report: terminal OK
-                    _ = posix.write(fd, "\x1b[0n") catch {};
+                    _ = std.c.write(fd, "\x1b[0n", 4);
                 }
             }
         },
@@ -1047,7 +1046,7 @@ fn handleCsi(csi: VtParser.CsiData, grid: *TermGrid, pty_fd: ?posix.fd_t) void {
         'c' => { // DA - Device Attributes
             if (pty_fd) |fd| {
                 // Report as VT220
-                _ = posix.write(fd, "\x1b[?62;22c") catch {};
+                _ = std.c.write(fd, "\x1b[?62;22c", 9);
             }
         },
         else => {},
@@ -1141,10 +1140,11 @@ const Winsize = extern struct {
     ws_ypixel: u16 = 0,
 };
 
-fn spawnPty(cols: u16, rows: u16) !struct { master_fd: posix.fd_t, child_pid: posix.pid_t } {
-    // Open master
-    const master_fd = try posix.open("/dev/ptmx", .{ .ACCMODE = .RDWR, .NOCTTY = true }, 0);
-    errdefer posix.close(master_fd);
+fn spawnPty(cols: u16, rows: u16) !struct { master_fd: std.c.fd_t, child_pid: std.c.pid_t } {
+    // Open master: O_RDWR=0x2, O_NOCTTY=0x400
+    const master_fd = std.c.open("/dev/ptmx", @as(std.c.O, @bitCast(@as(u32, 0x2 | 0x400))));
+    if (master_fd < 0) return error.OpenFailed;
+    errdefer _ = std.c.close(master_fd);
 
     // Unlock slave
     var unlock: c_int = 0;
@@ -1160,23 +1160,25 @@ fn spawnPty(cols: u16, rows: u16) !struct { master_fd: posix.fd_t, child_pid: po
     const slave_path = std.fmt.bufPrintZ(&slave_path_buf, "/dev/pts/{d}", .{pty_num}) catch return error.PathTooLong;
 
     // Fork
-    const pid = try posix.fork();
+    const pid = std.c.fork();
+    if (pid < 0) return error.ForkFailed;
 
     if (pid == 0) {
         // Child
-        posix.close(master_fd);
+        _ = std.c.close(master_fd);
         _ = linux.syscall0(.setsid);
 
-        const slave_fd = posix.open(slave_path, .{ .ACCMODE = .RDWR }, 0) catch std.posix.exit(1);
+        const slave_fd = std.c.open(slave_path.ptr, @as(std.c.O, @bitCast(@as(u32, 0x2)))); // O_RDWR
+        if (slave_fd < 0) std.c.exit(1);
         _ = linux.ioctl(@intCast(slave_fd), TIOCSCTTY, 0);
 
         var ws = Winsize{ .ws_row = rows, .ws_col = cols };
         _ = linux.ioctl(@intCast(slave_fd), TIOCSWINSZ, @intFromPtr(&ws));
 
-        posix.dup2(slave_fd, 0) catch std.posix.exit(1);
-        posix.dup2(slave_fd, 1) catch std.posix.exit(1);
-        posix.dup2(slave_fd, 2) catch std.posix.exit(1);
-        if (slave_fd > 2) posix.close(slave_fd);
+        _ = std.c.dup2(slave_fd, 0);
+        _ = std.c.dup2(slave_fd, 1);
+        _ = std.c.dup2(slave_fd, 2);
+        if (slave_fd > 2) _ = std.c.close(slave_fd);
 
         // Environment
         var col_buf: [32]u8 = undefined;
@@ -1187,13 +1189,13 @@ fn spawnPty(cols: u16, rows: u16) !struct { master_fd: posix.fd_t, child_pid: po
         var path_buf: [1024]u8 = undefined;
         var shell_buf: [256]u8 = undefined;
 
-        const home_val = std.posix.getenv("HOME") orelse "/root";
-        const user_val = std.posix.getenv("USER") orelse "root";
-        const lang_val = std.posix.getenv("LANG") orelse "C.UTF-8";
-        const path_val = std.posix.getenv("PATH") orelse "/usr/local/bin:/usr/bin:/bin";
+        const home_val = if (std.c.getenv("HOME")) |p| std.mem.span(p) else "/root";
+        const user_val = if (std.c.getenv("USER")) |p| std.mem.span(p) else "root";
+        const lang_val = if (std.c.getenv("LANG")) |p| std.mem.span(p) else "C.UTF-8";
+        const path_val = if (std.c.getenv("PATH")) |p| std.mem.span(p) else "/usr/local/bin:/usr/bin:/bin";
 
         // Detect user's shell
-        const shell_val = std.posix.getenv("SHELL") orelse "/bin/sh";
+        const shell_val = if (std.c.getenv("SHELL")) |p| std.mem.span(p) else "/bin/sh";
 
         const col_env = std.fmt.bufPrintZ(&col_buf, "COLUMNS={d}", .{cols}) catch "COLUMNS=80";
         const row_env = std.fmt.bufPrintZ(&row_buf, "LINES={d}", .{rows}) catch "LINES=24";
@@ -1222,12 +1224,14 @@ fn spawnPty(cols: u16, rows: u16) !struct { master_fd: posix.fd_t, child_pid: po
         // Inherit display variables
         var disp_buf: [128]u8 = undefined;
         var xdg_buf: [256]u8 = undefined;
-        if (std.posix.getenv("DISPLAY")) |d| {
+        if (std.c.getenv("DISPLAY")) |p| {
+            const d = std.mem.span(p);
             if (std.fmt.bufPrintZ(&disp_buf, "DISPLAY={s}", .{d})) |e| {
                 env_arr[ei] = e; ei += 1;
             } else |_| {}
         }
-        if (std.posix.getenv("XDG_RUNTIME_DIR")) |d| {
+        if (std.c.getenv("XDG_RUNTIME_DIR")) |p| {
+            const d = std.mem.span(p);
             if (std.fmt.bufPrintZ(&xdg_buf, "XDG_RUNTIME_DIR={s}", .{d})) |e| {
                 env_arr[ei] = e; ei += 1;
             } else |_| {}
@@ -1235,21 +1239,21 @@ fn spawnPty(cols: u16, rows: u16) !struct { master_fd: posix.fd_t, child_pid: po
 
         const env: [*:null]const ?[*:0]const u8 = &env_arr;
         const argv: [*:null]const ?[*:0]const u8 = &[_:null]?[*:0]const u8{ shell_path, "--login" };
-        _ = posix.execveZ(shell_path, argv, env) catch {};
-        std.posix.exit(1);
+        _ = std.c.execve(shell_path, argv, env);
+        std.c.exit(1);
     }
 
     // Parent: set non-blocking
-    const F_GETFL = 3;
-    const F_SETFL = 4;
-    const O_NONBLOCK: u32 = 0x800;
-    const cur_flags = try posix.fcntl(master_fd, F_GETFL, 0);
-    _ = try posix.fcntl(master_fd, F_SETFL, cur_flags | O_NONBLOCK);
+    const F_GETFL: c_int = 3;
+    const F_SETFL: c_int = 4;
+    const O_NONBLOCK: c_int = 0x800;
+    const cur_flags = std.c.fcntl(master_fd, F_GETFL);
+    if (cur_flags >= 0) _ = std.c.fcntl(master_fd, F_SETFL, cur_flags | O_NONBLOCK);
 
     return .{ .master_fd = master_fd, .child_pid = pid };
 }
 
-fn resizePty(fd: posix.fd_t, cols: u16, rows: u16) void {
+fn resizePty(fd: std.c.fd_t, cols: u16, rows: u16) void {
     var ws = Winsize{ .ws_row = rows, .ws_col = cols };
     _ = linux.ioctl(@intCast(fd), TIOCSWINSZ, @intFromPtr(&ws));
 }
@@ -1263,8 +1267,8 @@ pub const Terminal = struct {
 
     grid: TermGrid,
     parser: VtParser = .{},
-    pty_fd: ?posix.fd_t = null,
-    child_pid: ?posix.pid_t = null,
+    pty_fd: ?std.c.fd_t = null,
+    child_pid: ?std.c.pid_t = null,
 
     allocator: Allocator,
 
@@ -1286,11 +1290,12 @@ pub const Terminal = struct {
 
     pub fn deinit(self: *Terminal) void {
         if (self.pty_fd) |fd| {
-            posix.close(fd);
+            _ = std.c.close(fd);
         }
         if (self.child_pid) |pid| {
-            posix.kill(pid, posix.SIG.TERM) catch {};
-            _ = posix.waitpid(pid, 0);
+            _ = std.c.kill(pid, std.c.SIG.TERM);
+            var status: c_int = 0;
+            _ = std.c.waitpid(pid, &status, 0);
         }
         self.grid.deinit();
     }
@@ -1314,7 +1319,7 @@ pub const Terminal = struct {
         self.child_pid = result.child_pid;
     }
 
-    pub fn getPtyFd(self: *const Terminal) ?posix.fd_t {
+    pub fn getPtyFd(self: *const Terminal) ?std.c.fd_t {
         if (!self.visible) return null;
         return self.pty_fd;
     }
@@ -1324,11 +1329,12 @@ pub const Terminal = struct {
         var buf: [8192]u8 = undefined;
         // Read all available data
         while (true) {
-            const n = posix.read(fd, &buf) catch |err| {
-                if (err == error.WouldBlock) break;
-                // Child exited or error
+            const n_raw = std.c.read(fd, &buf, buf.len);
+            if (n_raw < 0) {
+                // EAGAIN/EWOULDBLOCK = 11 on Linux
                 break;
-            };
+            }
+            const n: usize = @intCast(n_raw);
             if (n == 0) break;
             // Feed through VT parser
             for (buf[0..n]) |byte| {
@@ -1340,7 +1346,7 @@ pub const Terminal = struct {
 
     pub fn sendBytes(self: *Terminal, data: []const u8) void {
         const fd = self.pty_fd orelse return;
-        _ = posix.write(fd, data) catch {};
+        _ = std.c.write(fd, data.ptr, data.len);
     }
 
     /// Convert XKB keysym + modifiers to terminal escape sequence and send

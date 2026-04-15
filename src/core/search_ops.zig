@@ -3,6 +3,7 @@ const EditorView = @import("../editor/view.zig").EditorView;
 
 /// Search for a query string across multiple files, appending formatted results.
 pub fn searchInFiles(
+    io: std.Io,
     allocator: std.mem.Allocator,
     query: []const u8,
     files: []const []const u8,
@@ -11,7 +12,7 @@ pub fn searchInFiles(
 ) void {
     for (files) |file_path| {
         if (results.items.len >= max_results) break;
-        const content = std.fs.cwd().readFileAlloc(allocator, file_path, 1024 * 1024) catch continue;
+        const content = std.Io.Dir.cwd().readFileAlloc(io, file_path, allocator, .limited(1024 * 1024)) catch continue;
         defer allocator.free(content);
 
         var line_num: u32 = 1;
