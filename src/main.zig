@@ -17,7 +17,7 @@ const file_walker = @import("core/file_walker.zig");
 const lsp = @import("lsp/client.zig");
 const FileTree = @import("ui/file_tree.zig").FileTree;
 const GitInfo = @import("core/git.zig").GitInfo;
-const Terminal = @import("ui/terminal.zig").Terminal;
+const Terminal = @import("ui/terminal_zt.zig").Terminal;
 const search_ops = @import("core/search_ops.zig");
 const lsp_ops = @import("core/lsp_ops.zig");
 const popups = @import("ui/popups.zig");
@@ -156,10 +156,9 @@ pub fn main(init: std.process.Init) !void {
     file_tree.visible = true;
     file_tree.populate() catch |err| logError("file tree populate", err);
 
-    // Terminal panel (XEmbed: embeds a real terminal emulator)
-    var terminal = try Terminal.init(allocator, init.environ_map);
+    // Terminal panel (integrated: zt VT/PTY rendered through zz's renderer)
+    var terminal = try Terminal.init(allocator);
     defer terminal.deinit();
-    terminal.setup(win.getConnection(), win.getWindowId());
 
     // LSP client
     var lsp_client = lsp.LspClient.init(allocator, io);
@@ -251,6 +250,11 @@ pub fn main(init: std.process.Init) !void {
         _ = std.c.epoll_ctl(epoll_fd, EPOLL_CTL_ADD, lsp_fd, &lsp_ev); // non-fatal: LSP poll optional
     }
 
+    // Terminal PTY fd registration tracker. We add/remove on toggle to keep
+    // a single epoll slot per shell — the fd value can change across spawns.
+    const EPOLL_CTL_DEL: c_uint = 2;
+    var terminal_fd_registered: ?std.c.fd_t = null;
+
     var running = true;
     var mouse_dragging = false;
     var minimap_dragging = false;
@@ -302,6 +306,31 @@ pub fn main(init: std.process.Init) !void {
     }
 
     while (running) {
+        // Sync the terminal PTY fd registration with the panel's current state.
+        // The fd can become available after toggle() spawns the shell, and
+        // disappears when the shell exits (checkChild zeroes it out).
+        const cur_pty = terminal.getPtyFd();
+        if (cur_pty != null and terminal_fd_registered == null) {
+            var t_ev = std.os.linux.epoll_event{
+                .events = EPOLLIN,
+                .data = .{ .u32 = 3 },
+            };
+            if (std.c.epoll_ctl(epoll_fd, EPOLL_CTL_ADD, cur_pty.?, &t_ev) == 0) {
+                terminal_fd_registered = cur_pty.?;
+            }
+        } else if (cur_pty == null and terminal_fd_registered != null) {
+            _ = std.c.epoll_ctl(epoll_fd, EPOLL_CTL_DEL, terminal_fd_registered.?, null);
+            terminal_fd_registered = null;
+        } else if (cur_pty != null and terminal_fd_registered != null and cur_pty.? != terminal_fd_registered.?) {
+            // Shell respawned with a new fd — swap the registration.
+            _ = std.c.epoll_ctl(epoll_fd, EPOLL_CTL_DEL, terminal_fd_registered.?, null);
+            var t_ev = std.os.linux.epoll_event{
+                .events = EPOLLIN,
+                .data = .{ .u32 = 3 },
+            };
+            terminal_fd_registered = if (std.c.epoll_ctl(epoll_fd, EPOLL_CTL_ADD, cur_pty.?, &t_ev) == 0) cur_pty.? else null;
+        }
+
         var events: [16]std.os.linux.epoll_event = undefined;
         const n_raw = std.c.epoll_wait(epoll_fd, &events, events.len, -1);
         if (n_raw < 0) continue;
@@ -520,8 +549,9 @@ pub fn main(init: std.process.Init) !void {
                                             relayoutWithTerminal(&pane_mgr, &file_tree, &terminal, tab_bar_h, win.width, win.height, &font);
                                             markAllPanesDirty(&pane_mgr);
                                         } else if (terminal.focused) {
-                                            // Terminal is focused: only Ctrl+` escapes back to editor
-                                            // All other keys are delivered by X11 directly to the child window
+                                            // Terminal is focused: send the keystroke to the PTY.
+                                            // toggle_terminal is the only mapped action that escapes back to the editor.
+                                            _ = terminal.handleKey(ke.keysym, ke.modifiers.ctrl, ke.modifiers.shift);
                                         } else {
                                         switch (action) {
                                             .command_palette => openCommandPalette(&mode, &overlay, &filtered_display, allocator),
@@ -624,7 +654,8 @@ pub fn main(init: std.process.Init) !void {
                                         resetCursorBlink(editor);
                                         // IME position: ext_move disabled for stability
                                     } else if (terminal.focused) {
-                                        // Terminal focused: X11 delivers keys to child window directly
+                                        // No editor binding for this key; route the special key into the PTY.
+                                        _ = terminal.handleKey(ke.keysym, ke.modifiers.ctrl, ke.modifiers.shift);
                                     }
                                 }
                             },
@@ -663,7 +694,8 @@ pub fn main(init: std.process.Init) !void {
                                     }
                                     editor.markAllDirty();
                                 } else if (terminal.focused) {
-                                    // Terminal focused: X11 delivers text to child window directly
+                                    // Terminal focused: write the typed bytes to the PTY.
+                                    terminal.sendBytes(te.slice());
                                 } else {
                                     if (completion_active) {
                                         completion_active = false;
@@ -1137,6 +1169,11 @@ pub fn main(init: std.process.Init) !void {
                             editor.markAllDirty();
                         }
                     }
+                },
+
+                3 => { // Terminal PTY readable
+                    terminal.processOutput();
+                    terminal.checkChild();
                 },
 
                 else => {},

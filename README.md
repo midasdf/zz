@@ -188,7 +188,7 @@ src/
 │   ├── render.zig        Pixel rendering (BGRA32)
 │   ├── overlay.zig       Command palette / finder popup
 │   ├── file_tree.zig     Directory tree sidebar
-│   └── terminal.zig      VT terminal emulator
+│   └── terminal_zt.zig   Embedded terminal (powered by zt)
 ├── lsp/
 │   └── client.zig        LSP JSON-RPC client
 ├── core/
@@ -199,7 +199,7 @@ src/
     └── keymap.zig        Keybind mapping
 ```
 
-**~16,000 lines of Zig. Zero external Zig dependencies.**
+**~16,000 lines of Zig. Single Zig dependency: [zt](https://github.com/midasdf/zt) — embedded terminal VT/PTY engine.**
 
 All rendering is CPU-based (xcb shared memory). No GPU, no OpenGL, no Wayland (yet). Single-threaded epoll event loop. The only subprocess communication is with LSP servers (JSON-RPC over stdin/stdout) and the embedded terminal (PTY).
 

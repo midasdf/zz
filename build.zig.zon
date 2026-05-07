@@ -2,5 +2,9 @@
     .name = .zz,
     .version = "0.1.0",
     .fingerprint = 0x24d91ba1b02fba38,
+    .minimum_zig_version = "0.16.0",
     .paths = .{""},
+    .dependencies = .{
+        .zt = .{ .path = "../zt" },
+    },
 }
